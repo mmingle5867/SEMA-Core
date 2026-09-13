@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model SemaCoreIdentityState {
+  stateKey       String   @id
+  installationId String   @unique
+  nextLocalId    BigInt   @default(1)
+  status         String   @default("ACTIVE")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("sema_core_identity_state")
+}
+
+model SemaIdentifierReservation {
+  id              String   @id
+  installationId  String
+  firstLocalValue BigInt
+  count           Int
+  typeCode        String?
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+
+  @@index([installationId, firstLocalValue])
+  @@map("sema_identifier_reservations")
+}
+
+model SemaIssuedIdentifier {
+  semaId          String   @id
+  reservationId   String
+  installationId  String
+  localValue      BigInt
+  localCode       String
+  typeCode        String?
+  status          String   @default("RESERVED")
+  metadata        Json     @default("{}")
+  issuedAt        DateTime @default(now())
+  consumedAt      DateTime?
+
+  @@unique([installationId, localValue])
+  @@index([reservationId, status])
+  @@index([typeCode])
+  @@map("sema_issued_identifiers")
+}
+
+model SemaCoreCommand {
+  id         String   @id
+  commandType String
+  actorId    String?
+  workspaceId String?
+  subjectIds Json     @default("[]")
+  context    Json     @default("{}")
+  payload    Json     @default("{}")
+  status     String   @default("PENDING")
+  createdAt  DateTime @default(now())
+
+  @@index([commandType, createdAt])
+  @@index([actorId, createdAt])
+  @@map("sema_core_commands")
+}
+
+model SemaCoreExecution {
+  id          String   @id
+  commandId   String
+  providerId  String?
+  status      String   @default("PENDING")
+  startedAt   DateTime?
+  completedAt DateTime?
+  context     Json     @default("{}")
+  error       Json?
+  createdAt   DateTime @default(now())
+
+  @@index([commandId, createdAt])
+  @@index([status, createdAt])
+  @@map("sema_core_executions")
+}
+
+model SemaCoreResult {
+  id          String   @id
+  executionId String
+  resultType  String
+  subjectIds  Json     @default("[]")
+  data        Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  @@index([executionId, createdAt])
+  @@map("sema_core_results")
+}
+
+model SemaCoreEvent {
+  id          String   @id
+  eventType   String
+  commandId   String?
+  executionId String?
+  subjectIds  Json     @default("[]")
+  data        Json     @default("{}")
+  occurredAt  DateTime @default(now())
+
+  @@index([eventType, occurredAt])
+  @@index([commandId, occurredAt])
+  @@map("sema_core_events")
+}
+
+model SemaCoreAuditEntry {
+  id          String   @id
+  action      String
+  actorId     String?
+  commandId   String?
+  executionId String?
+  subjectIds  Json     @default("[]")
+  evidence    Json     @default("{}")
+  occurredAt  DateTime @default(now())
+
+  @@index([action, occurredAt])
+  @@index([actorId, occurredAt])
+  @@map("sema_core_audit_entries")
+}
+
+model SemaCoreCapability {
+  id            String   @id
+  capabilityKey String   @unique
+  displayName   String
+  description   String
+  providerKey   String
+  version       String
+  status        String   @default("ACTIVE")
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([status, displayName])
+  @@map("sema_core_capabilities")
+}
