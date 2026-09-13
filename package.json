@@ -1,17 +1,22 @@
 {
   "name": "@selo/sema-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Local-first SEMA Core: identity, command, event, audit, policy, and capability contracts.",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "prisma", "README.md", "docs"],
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "tsx test/core.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:host": "tsx test/core-host.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.3.3"
   }

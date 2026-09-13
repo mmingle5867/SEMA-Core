@@ -7,12 +7,12 @@ import type {
 
 /** Test/reference store. Production adapters must provide database transactions. */
 export class InMemorySemaCoreStore implements SemaCoreStore {
-  private state: CoreIdentityState | null = null;
-  private readonly reservations = new Map<string, SemaIdentifierReservation>();
-  private readonly identifiers = new Map<string, SemaIdentifier>();
-  private readonly commands = new Map<string, CoreCommand>();
-  private readonly executions = new Map<string, CoreExecution>();
-  private readonly capabilities = new Map<string, CoreCapability>();
+  protected state: CoreIdentityState | null = null;
+  protected readonly reservations = new Map<string, SemaIdentifierReservation>();
+  protected readonly identifiers = new Map<string, SemaIdentifier>();
+  protected readonly commands = new Map<string, CoreCommand>();
+  protected readonly executions = new Map<string, CoreExecution>();
+  protected readonly capabilities = new Map<string, CoreCapability>();
   readonly results: CoreResult[] = [];
   readonly events: CoreEvent[] = [];
   readonly audits: CoreAuditEntry[] = [];

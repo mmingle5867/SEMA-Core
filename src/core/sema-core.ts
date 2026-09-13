@@ -25,6 +25,14 @@ export class SemaCore {
     return this.store.initializeIdentity(this.installationId);
   }
 
+  getMaxReservationSize() { return this.options.maxReservationSize; }
+
+  /** Installation administration may change this bounded policy at runtime. */
+  setMaxReservationSize(value: number) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error('maxReservationSize must be a positive integer');
+    this.options.maxReservationSize = value;
+  }
+
   async issueIdentifier(typeCode?: string, metadata: JsonObject = {}) {
     const { identifiers } = await this.reserveIdentifiers(1, typeCode, metadata);
     return this.consumeReservedIdentifier(identifiers[0]!.id, identifiers[0]!.reservationId, metadata);
