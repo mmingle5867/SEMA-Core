@@ -16,6 +16,7 @@ assert.deepEqual(parseKeyId('3-A-5'), { installationId: '3-A', localId: '5', loc
 
 const reservation = await core.reserveIdentifiers(3, 'ART', { purpose: 'test' });
 assert.deepEqual(reservation.identifiers.map((identifier) => identifier.id), ['3-3', '3-4', '3-5']);
+assert.equal(reservation.reservation.id, '3-3');
 assert.equal(reservation.identifiers[0]!.status, 'RESERVED');
 const used = await core.consumeReservedIdentifier(reservation.identifiers[0]!.id, reservation.reservation.id, { object: 'artwork' });
 assert.equal(used.status, 'ISSUED');

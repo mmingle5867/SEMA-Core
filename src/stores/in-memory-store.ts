@@ -28,8 +28,11 @@ export class InMemorySemaCoreStore implements SemaCoreStore {
   async reserveIdentifiers(input: { count: number; typeCode?: string; metadata: JsonObject }) {
     if (!this.state) throw new Error('SEMA Core is not initialized');
     const firstLocalValue = this.state.nextLocalId;
+    const reservationId = formatKeyId({ installationId: this.state.installationId, localValue: firstLocalValue });
     const reservation: SemaIdentifierReservation = {
-      id: `reservation-${this.reservations.size + 1}`, installationId: this.state.installationId,
+      // A reservation is keyed by its first reserved permanent KeyID. It does
+      // not consume an additional local number ahead of the requested objects.
+      id: reservationId, installationId: this.state.installationId,
       firstLocalValue, count: input.count, typeCode: input.typeCode, metadata: input.metadata, createdAt: new Date(),
     };
     const identifiers: SemaIdentifier[] = [];
