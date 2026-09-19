@@ -39,6 +39,10 @@ export function createCoreHostHttpServer(host) {
                 return write(response, 200, await host.capabilities(context));
             if (request.method === 'GET' && url.pathname === '/v1/core/documentation')
                 return write(response, 200, await host.documentation(context));
+            if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/reservations')
+                return write(response, 201, await host.reserveIdentifiers(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume')
+                return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request)));
             return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
         }
         catch (error) {

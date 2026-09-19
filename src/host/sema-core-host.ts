@@ -47,8 +47,7 @@ export class SemaCoreHost {
   }
 
   async updateSettings(context: CoreHostRequestContext, patch: Partial<CoreHostSettings>) {
-    const allowed = await this.authorization.canAdminister({ actorId: context.actorId, resource: 'settings' });
-    if (!allowed) throw new Error('Core Host settings administration is not authorized');
+    await this.requireAdministration(context, 'settings');
     const current = await this.getSettings(context);
     const values = validateSettings(patch, current.values);
     const next: VersionedCoreHostSettings = { ...current, values, revision: current.revision + 1, updatedAt: new Date(), updatedById: context.actorId };
@@ -60,6 +59,16 @@ export class SemaCoreHost {
 
   async statistics(context: CoreHostRequestContext) { await this.requireRead(context, 'statistics'); return this.store.getHostStatistics(); }
   async capabilities(context: CoreHostRequestContext) { await this.requireRead(context, 'capabilities'); return this.store.getCapabilitiesForHost(); }
+
+  async reserveIdentifiers(context: CoreHostRequestContext, input: { count: number; typeCode?: string; metadata?: import('../core/types.js').JsonObject }) {
+    await this.requireAdministration(context, 'identifiers');
+    return this.core.reserveIdentifiers(input.count, input.typeCode, input.metadata ?? {});
+  }
+
+  async consumeReservedIdentifier(context: CoreHostRequestContext, input: { reservationId: string; id: string; metadata?: import('../core/types.js').JsonObject }) {
+    await this.requireAdministration(context, 'identifiers');
+    return this.core.consumeReservedIdentifier(input.id, input.reservationId, input.metadata ?? {});
+  }
 
   async documentation(context: CoreHostRequestContext): Promise<CoreHostDocumentation> {
     await this.requireRead(context, 'documentation');
@@ -73,6 +82,8 @@ export class SemaCoreHost {
         { method: 'GET', path: '/v1/core/statistics', purpose: 'Read operational totals without application business data.' },
         { method: 'GET', path: '/v1/core/capabilities', purpose: 'List installed capability records.' },
         { method: 'GET', path: '/v1/core/documentation', purpose: 'Read machine-readable backend documentation.' },
+        { method: 'POST', path: '/v1/core/identifiers/reservations', purpose: 'Reserve permanent identifiers for authorized local application work.' },
+        { method: 'POST', path: '/v1/core/identifiers/consume', purpose: 'Record use of a previously reserved identifier.' },
       ],
       settings: [
         { key: 'maxReservationSize', description: 'Maximum IDs granted by one reservation request.' },
@@ -87,5 +98,9 @@ export class SemaCoreHost {
 
   private async requireRead(context: CoreHostRequestContext, resource: Parameters<CoreHostAuthorization['canRead']>[0]['resource']) {
     if (!(await this.authorization.canRead({ actorId: context.actorId, resource }))) throw new Error(`Core Host ${resource} access is not authorized`);
+  }
+
+  private async requireAdministration(context: CoreHostRequestContext, resource: 'settings' | 'identifiers') {
+    if (!(await this.authorization.canAdminister({ actorId: context.actorId, resource }))) throw new Error(`Core Host ${resource} administration is not authorized`);
   }
 }

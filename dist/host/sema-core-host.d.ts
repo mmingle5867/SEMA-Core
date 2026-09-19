@@ -20,8 +20,22 @@ export declare class SemaCoreHost {
     getSettings(context: CoreHostRequestContext): Promise<VersionedCoreHostSettings>;
     updateSettings(context: CoreHostRequestContext, patch: Partial<CoreHostSettings>): Promise<VersionedCoreHostSettings>;
     statistics(context: CoreHostRequestContext): Promise<import("./types.js").CoreHostStatistics>;
-    capabilities(context: CoreHostRequestContext): Promise<import("../index.js").CoreCapability[]>;
+    capabilities(context: CoreHostRequestContext): Promise<import("../core/types.js").CoreCapability[]>;
+    reserveIdentifiers(context: CoreHostRequestContext, input: {
+        count: number;
+        typeCode?: string;
+        metadata?: import('../core/types.js').JsonObject;
+    }): Promise<{
+        reservation: import("../core/types.js").SemaIdentifierReservation;
+        identifiers: import("../core/types.js").SemaIdentifier[];
+    }>;
+    consumeReservedIdentifier(context: CoreHostRequestContext, input: {
+        reservationId: string;
+        id: string;
+        metadata?: import('../core/types.js').JsonObject;
+    }): Promise<import("../core/types.js").SemaIdentifier>;
     documentation(context: CoreHostRequestContext): Promise<CoreHostDocumentation>;
     private requireRead;
+    private requireAdministration;
 }
 //# sourceMappingURL=sema-core-host.d.ts.map

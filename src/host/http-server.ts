@@ -40,6 +40,8 @@ export function createCoreHostHttpServer(host: SemaCoreHost): Server {
       if (request.method === 'GET' && url.pathname === '/v1/core/statistics') return write(response, 200, await host.statistics(context));
       if (request.method === 'GET' && url.pathname === '/v1/core/capabilities') return write(response, 200, await host.capabilities(context));
       if (request.method === 'GET' && url.pathname === '/v1/core/documentation') return write(response, 200, await host.documentation(context));
+      if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/reservations') return write(response, 201, await host.reserveIdentifiers(context, await readJson(request) as { count: number; typeCode?: string; metadata?: import('../core/types.js').JsonObject }));
+      if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume') return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request) as { reservationId: string; id: string; metadata?: import('../core/types.js').JsonObject }));
       return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
