@@ -12,10 +12,10 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
 const adminIds = new Set((process.env.SEMA_CORE_ADMIN_IDS ?? '').split(',').map((value) => value.trim()).filter(Boolean));
 const store = new PrismaSemaCoreHostStore();
 const core = new SemaCore(store, { installationId, maxReservationSize: 100 });
-const host = new SemaCoreHost(core, store, new LocalCoreHostAuthorization(adminIds), '0.2.3');
+const host = new SemaCoreHost(core, store, new LocalCoreHostAuthorization(adminIds), '0.2.4');
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname: process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1', port });
-console.log(`SEMA Core v0.2.3 listening on http://${process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1'}:${port}`);
+console.log(`SEMA Core v0.2.4 listening on http://${process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1'}:${port}`);
 for (const signal of ['SIGINT', 'SIGTERM'])
     process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));
 //# sourceMappingURL=start.js.map

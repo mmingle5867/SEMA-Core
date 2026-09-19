@@ -62,7 +62,7 @@ export interface CoreHostAuthorization {
     }): Promise<boolean>;
     canAdminister(input: {
         actorId: string | null;
-        resource: 'settings' | 'identifiers';
+        resource: 'settings' | 'identifiers' | 'runtime';
     }): Promise<boolean>;
 }
 export interface CoreHostRequestContext {

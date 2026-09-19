@@ -1,4 +1,5 @@
 import type { SemaCore } from '../core/sema-core.js';
+import type { CoreCapability, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 
@@ -70,6 +71,52 @@ export class SemaCoreHost {
     return this.core.consumeReservedIdentifier(input.id, input.reservationId, input.metadata ?? {});
   }
 
+  /** Core runtime records live in the Core database, never in an application's database. */
+  async createCommand(context: CoreHostRequestContext, input: { commandType: string; actorId?: string | null; workspaceId?: string | null; subjectIds?: string[]; context?: JsonObject; payload?: JsonObject }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.createCommand(input);
+  }
+
+  async startExecution(context: CoreHostRequestContext, input: { commandId: string; providerId?: string | null; context?: JsonObject }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.startExecution(input);
+  }
+
+  async completeExecution(context: CoreHostRequestContext, input: { execution: CoreExecution; status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>; resultType?: string; subjectIds?: string[]; result?: JsonObject; error?: JsonObject }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.completeExecution(input);
+  }
+
+  async recordEvent(context: CoreHostRequestContext, input: { eventType: string; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; data?: JsonObject }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.recordEvent(input);
+  }
+
+  async recordAudit(context: CoreHostRequestContext, input: { action: string; actorId?: string | null; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; evidence?: JsonObject }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.recordAudit(input);
+  }
+
+  async registerCapability(context: CoreHostRequestContext, input: Omit<CoreCapability, 'id' | 'status'> & { status?: CoreCapability['status'] }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.registerCapability(input);
+  }
+
+  async discoverCapabilities(context: CoreHostRequestContext, query = '') {
+    await this.requireRead(context, 'capabilities');
+    return this.core.discoverCapabilities(query);
+  }
+
+  async authorizeInvocation(context: CoreHostRequestContext, input: { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.authorizeInvocation(input);
+  }
+
+  async resolveCapability(context: CoreHostRequestContext, input: { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }) {
+    await this.requireAdministration(context, 'runtime');
+    return this.core.resolveCapability(input);
+  }
+
   async documentation(context: CoreHostRequestContext): Promise<CoreHostDocumentation> {
     await this.requireRead(context, 'documentation');
     return {
@@ -84,6 +131,15 @@ export class SemaCoreHost {
         { method: 'GET', path: '/v1/core/documentation', purpose: 'Read machine-readable backend documentation.' },
         { method: 'POST', path: '/v1/core/identifiers/reservations', purpose: 'Reserve permanent identifiers for authorized local application work.' },
         { method: 'POST', path: '/v1/core/identifiers/consume', purpose: 'Record use of a previously reserved identifier.' },
+        { method: 'POST', path: '/v1/core/runtime/commands', purpose: 'Create a Core command in the shared Core database.' },
+        { method: 'POST', path: '/v1/core/runtime/executions', purpose: 'Start a Core execution in the shared Core database.' },
+        { method: 'POST', path: '/v1/core/runtime/executions/complete', purpose: 'Complete a Core execution and optionally record its result.' },
+        { method: 'POST', path: '/v1/core/runtime/events', purpose: 'Record a Core event in the shared Core database.' },
+        { method: 'POST', path: '/v1/core/runtime/audits', purpose: 'Record a Core audit entry in the shared Core database.' },
+        { method: 'POST', path: '/v1/core/runtime/capabilities', purpose: 'Register or update a Core capability.' },
+        { method: 'GET', path: '/v1/core/runtime/capabilities', purpose: 'Discover active Core capabilities.' },
+        { method: 'POST', path: '/v1/core/runtime/capabilities/authorize', purpose: 'Authorize a Core capability invocation.' },
+        { method: 'POST', path: '/v1/core/runtime/capabilities/resolve', purpose: 'Resolve an authorized Core capability.' },
       ],
       settings: [
         { key: 'maxReservationSize', description: 'Maximum IDs granted by one reservation request.' },
@@ -100,7 +156,7 @@ export class SemaCoreHost {
     if (!(await this.authorization.canRead({ actorId: context.actorId, resource }))) throw new Error(`Core Host ${resource} access is not authorized`);
   }
 
-  private async requireAdministration(context: CoreHostRequestContext, resource: 'settings' | 'identifiers') {
+  private async requireAdministration(context: CoreHostRequestContext, resource: 'settings' | 'identifiers' | 'runtime') {
     if (!(await this.authorization.canAdminister({ actorId: context.actorId, resource }))) throw new Error(`Core Host ${resource} administration is not authorized`);
   }
 }

@@ -43,6 +43,24 @@ export function createCoreHostHttpServer(host) {
                 return write(response, 201, await host.reserveIdentifiers(context, await readJson(request)));
             if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume')
                 return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands')
+                return write(response, 201, await host.createCommand(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions')
+                return write(response, 201, await host.startExecution(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete')
+                return write(response, 200, await host.completeExecution(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/events')
+                return write(response, 201, await host.recordEvent(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/audits')
+                return write(response, 201, await host.recordAudit(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities')
+                return write(response, 200, await host.registerCapability(context, await readJson(request)));
+            if (request.method === 'GET' && url.pathname === '/v1/core/runtime/capabilities')
+                return write(response, 200, await host.discoverCapabilities(context, url.searchParams.get('query') ?? ''));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/authorize')
+                return write(response, 200, await host.authorizeInvocation(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve')
+                return write(response, 200, await host.resolveCapability(context, await readJson(request)));
             return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
         }
         catch (error) {
