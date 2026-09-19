@@ -137,3 +137,13 @@ model SemaCoreCapability {
   @@index([status, displayName])
   @@map("sema_core_capabilities")
 }
+
+model SemaCoreHostSettings {
+  installationId String   @id
+  revision       Int
+  updatedAt      DateTime
+  updatedById    String?
+  values         Json     @default("{}")
+
+  @@map("sema_core_host_settings")
+}

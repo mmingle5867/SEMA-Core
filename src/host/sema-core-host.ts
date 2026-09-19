@@ -1,6 +1,6 @@
 import type { SemaCore } from '../core/sema-core.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
-import { DEFAULT_CORE_HOST_SETTINGS } from './in-memory-host-store.js';
+import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS) as Array<keyof CoreHostSettings>;
 

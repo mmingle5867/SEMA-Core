@@ -1,5 +1,6 @@
 import type { CoreLifecycleStatus } from '../core/types.js';
 import { InMemorySemaCoreStore } from '../stores/in-memory-store.js';
+import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import type { CoreHostSettings, CoreHostStatistics, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 
 const emptyLifecycleCounts = (): Record<CoreLifecycleStatus, number> => ({ PENDING: 0, RUNNING: 0, WAITING: 0, CANCELLED: 0, FAILED: 0, SUCCESS: 0 });
@@ -36,7 +37,4 @@ export class InMemorySemaCoreHostStore extends InMemorySemaCoreStore implements 
   async getCapabilitiesForHost() { return [...this.capabilities.values()].sort((a, b) => a.displayName.localeCompare(b.displayName)); }
 }
 
-export const DEFAULT_CORE_HOST_SETTINGS: CoreHostSettings = {
-  maxReservationSize: 100, auditRetentionDays: 3650, eventRetentionDays: 3650,
-  capabilityAutoFallback: true, documentationEnabled: true,
-};
+export { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';

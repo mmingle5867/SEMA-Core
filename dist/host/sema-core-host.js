@@ -1,4 +1,4 @@
-import { DEFAULT_CORE_HOST_SETTINGS } from './in-memory-host-store.js';
+import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS);
 function validateSettings(input, current) {
     const values = { ...current, ...input };

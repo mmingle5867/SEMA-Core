@@ -1,23 +1,41 @@
 {
   "name": "@selo/sema-core",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Local-first SEMA Core: identity, command, event, audit, policy, and capability contracts.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "prisma", "README.md", "docs"],
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": [
+    "dist",
+    "prisma",
+    "README.md",
+    "docs"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "tsx test/core.test.ts",
     "test:host": "tsx test/core-host.test.ts",
     "typecheck": "tsc --noEmit",
+    "prisma:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "start": "node --env-file=.env dist/host/start.js",
+    "migrate:vectorforge-core": "tsx src/migration/migrate-vectorforge-core.ts",
     "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "prisma": "^5.22.0",
     "tsx": "^4.19.0",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0"
   }
 }
