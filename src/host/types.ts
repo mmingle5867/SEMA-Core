@@ -1,5 +1,10 @@
 import type { CoreCapability, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 
+/**
+ * Installation-level settings. `documentationEnabled`, `auditRetentionDays`, `eventRetentionDays`
+ * and `capabilityAutoFallback` are reserved for future use (self-documenting Core, retention,
+ * capability fallback policy). They are stored and validated but intentionally not acted on yet.
+ */
 export interface CoreHostSettings {
   maxReservationSize: number;
   auditRetentionDays: number;

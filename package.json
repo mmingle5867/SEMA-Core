@@ -10,7 +10,7 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "tsx test/core.test.ts",
+    "test": "tsx test/core.test.ts && tsx test/base56.test.ts && tsx test/core-host.test.ts && tsx test/http.test.ts",
     "test:host": "tsx test/core-host.test.ts",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run build"
