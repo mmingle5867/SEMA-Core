@@ -39,8 +39,12 @@ export function parseInstallationId(value) {
     const segments = installationId.split('-');
     if (!installationId || segments.some((segment) => !segment))
         throw new Error('InstallationID must contain non-empty hyphen-delimited segments');
-    for (const segment of segments)
+    for (const segment of segments) {
         assertSegment(segment, 'SEMA InstallationID segment');
+        // Every segment is an object's LocalID in its parent, and LocalID zero is reserved.
+        if (decodeBase56(segment) === ZERO)
+            throw new Error('SEMA InstallationID segment cannot be zero');
+    }
     return installationId;
 }
 export function formatKeyId(input) {
