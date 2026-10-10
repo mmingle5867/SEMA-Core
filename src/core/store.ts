@@ -23,6 +23,8 @@ export interface SemaCoreStore {
   consumeReservedIdentifier(reservationId: string, id: string, metadata?: JsonObject): Promise<SemaIdentifier>;
   createCommand(command: CoreCommand): Promise<CoreCommand>;
   updateCommand(id: string, update: Partial<Pick<CoreCommand, 'status'>>): Promise<CoreCommand>;
+  findCommand(id: string): Promise<CoreCommand | null>;
+  listCommands(input: { actorId?: string | null; commandTypePrefix?: string; status?: CoreCommand['status']; limit?: number }): Promise<CoreCommand[]>;
   createExecution(execution: CoreExecution): Promise<CoreExecution>;
   updateExecution(id: string, update: Partial<Pick<CoreExecution, 'status' | 'completedAt' | 'error'>>): Promise<CoreExecution>;
   createResult(result: CoreResult): Promise<CoreResult>;

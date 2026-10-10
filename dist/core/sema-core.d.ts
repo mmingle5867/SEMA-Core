@@ -39,6 +39,17 @@ export declare class SemaCore {
         providerId?: string | null;
         context?: JsonObject;
     }): Promise<CoreExecution>;
+    updateCommandStatus(input: {
+        commandId: string;
+        status: CoreLifecycleStatus;
+    }): Promise<CoreCommand>;
+    getCommand(commandId: string): Promise<CoreCommand | null>;
+    listCommands(input?: {
+        actorId?: string | null;
+        commandTypePrefix?: string;
+        status?: CoreLifecycleStatus;
+        limit?: number;
+    }): Promise<CoreCommand[]>;
     completeExecution(input: {
         execution: CoreExecution;
         status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>;

@@ -67,6 +67,10 @@ export class InMemorySemaCoreStore {
         this.commands.set(id, next);
         return next;
     }
+    async findCommand(id) { const command = this.commands.get(id); return command ? structuredClone(command) : null; }
+    async listCommands(input) {
+        return [...this.commands.values()].filter((command) => input.actorId === undefined || command.actorId === input.actorId).filter((command) => !input.commandTypePrefix || command.commandType.startsWith(input.commandTypePrefix)).filter((command) => !input.status || command.status === input.status).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, input.limit ?? 100).map((command) => structuredClone(command));
+    }
     async createExecution(execution) { this.executions.set(execution.id, execution); return execution; }
     async updateExecution(id, update) {
         const execution = this.executions.get(id);

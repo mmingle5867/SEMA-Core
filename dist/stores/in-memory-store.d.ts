@@ -56,6 +56,13 @@ export declare class InMemorySemaCoreStore implements SemaCoreStore {
         payload: JsonObject;
         createdAt: Date;
     }>;
+    findCommand(id: string): Promise<CoreCommand | null>;
+    listCommands(input: {
+        actorId?: string | null;
+        commandTypePrefix?: string;
+        status?: CoreCommand['status'];
+        limit?: number;
+    }): Promise<CoreCommand[]>;
     createExecution(execution: CoreExecution): Promise<CoreExecution>;
     updateExecution(id: string, update: Partial<Pick<CoreExecution, 'status' | 'completedAt' | 'error'>>): Promise<{
         status: import("../core/types.js").CoreLifecycleStatus;

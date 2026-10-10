@@ -20,11 +20,16 @@ async function readJson(request) {
     return source ? JSON.parse(source) : {};
 }
 /** Minimal dependency-free local API. A reverse proxy or richer transport may wrap this later. */
-export function createCoreHostHttpServer(host) {
+export function createCoreHostHttpServer(host, options = {}) {
+    const applicationClients = new Map((options.applicationClients ?? []).map((client) => [client.applicationKey, client.secret]));
     return createServer(async (request, response) => {
         const url = new URL(request.url ?? '/', 'http://localhost');
-        const actorHeader = request.headers['x-sema-actor-id'];
+        const actorHeader = request.headers['x-sema-application-key'] ?? request.headers['x-sema-actor-id'];
         const actorId = typeof actorHeader === 'string' && actorHeader.trim() ? actorHeader.trim() : null;
+        const secretHeader = request.headers['x-sema-application-secret'];
+        const secret = typeof secretHeader === 'string' ? secretHeader : '';
+        if (applicationClients.size > 0 && (!actorId || applicationClients.get(actorId) !== secret))
+            return write(response, 401, { error: { code: 'UNAUTHENTICATED', message: 'A valid SEMA application credential is required.' } });
         const context = { actorId };
         try {
             if (request.method === 'GET' && url.pathname === '/v1/core/health')
@@ -45,6 +50,15 @@ export function createCoreHostHttpServer(host) {
                 return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request)));
             if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands')
                 return write(response, 201, await host.createCommand(context, await readJson(request)));
+            if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands/status')
+                return write(response, 200, await host.updateCommandStatus(context, await readJson(request)));
+            if (request.method === 'GET' && url.pathname === '/v1/core/runtime/commands') {
+                const commandId = url.searchParams.get('id');
+                if (commandId)
+                    return write(response, 200, await host.getCommand(context, commandId));
+                const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined;
+                return write(response, 200, await host.listCommands(context, { actorId: url.searchParams.has('actorId') ? url.searchParams.get('actorId') : undefined, commandTypePrefix: url.searchParams.get('commandTypePrefix') ?? undefined, status: (url.searchParams.get('status') ?? undefined), limit }));
+            }
             if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions')
                 return write(response, 201, await host.startExecution(context, await readJson(request)));
             if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete')
@@ -71,7 +85,7 @@ export function createCoreHostHttpServer(host) {
     });
 }
 export async function startCoreHostHttpServer(host, options = {}) {
-    const server = createCoreHostHttpServer(host);
+    const server = createCoreHostHttpServer(host, options);
     await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(options.port ?? 4310, options.hostname ?? '127.0.0.1', () => { server.off('error', reject); resolve(); });

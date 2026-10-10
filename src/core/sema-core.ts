@@ -85,6 +85,14 @@ export class SemaCore {
     return this.store.createExecution(execution);
   }
 
+  async updateCommandStatus(input: { commandId: string; status: CoreLifecycleStatus }) { return this.store.updateCommand(input.commandId, { status: input.status }); }
+  async getCommand(commandId: string) { return this.store.findCommand(commandId); }
+  async listCommands(input: { actorId?: string | null; commandTypePrefix?: string; status?: CoreLifecycleStatus; limit?: number } = {}) {
+    const limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) throw new Error('Command list limit must be between 1 and 250');
+    return this.store.listCommands({ ...input, limit });
+  }
+
   async completeExecution(input: {
     execution: CoreExecution;
     status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>;

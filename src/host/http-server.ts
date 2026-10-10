@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { CoreHostSettings } from './types.js';
-import type { CoreCapability, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
+import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import { SemaCoreHost } from './sema-core-host.js';
 
-export interface CoreHostHttpOptions { hostname?: string; port?: number; }
+export interface CoreHostHttpOptions { hostname?: string; port?: number; applicationClients?: Array<{ applicationKey: string; secret: string }>; }
 
 function serialize(value: unknown) {
   return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item);
@@ -28,11 +28,15 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 }
 
 /** Minimal dependency-free local API. A reverse proxy or richer transport may wrap this later. */
-export function createCoreHostHttpServer(host: SemaCoreHost): Server {
+export function createCoreHostHttpServer(host: SemaCoreHost, options: CoreHostHttpOptions = {}): Server {
+  const applicationClients = new Map((options.applicationClients ?? []).map((client) => [client.applicationKey, client.secret]));
   return createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
-    const actorHeader = request.headers['x-sema-actor-id'];
+    const actorHeader = request.headers['x-sema-application-key'] ?? request.headers['x-sema-actor-id'];
     const actorId = typeof actorHeader === 'string' && actorHeader.trim() ? actorHeader.trim() : null;
+    const secretHeader = request.headers['x-sema-application-secret'];
+    const secret = typeof secretHeader === 'string' ? secretHeader : '';
+    if (applicationClients.size > 0 && (!actorId || applicationClients.get(actorId) !== secret)) return write(response, 401, { error: { code: 'UNAUTHENTICATED', message: 'A valid SEMA application credential is required.' } });
     const context = { actorId };
     try {
       if (request.method === 'GET' && url.pathname === '/v1/core/health') return write(response, 200, await host.health(context));
@@ -44,6 +48,8 @@ export function createCoreHostHttpServer(host: SemaCoreHost): Server {
       if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/reservations') return write(response, 201, await host.reserveIdentifiers(context, await readJson(request) as { count: number; typeCode?: string; metadata?: import('../core/types.js').JsonObject }));
       if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume') return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request) as { reservationId: string; id: string; metadata?: import('../core/types.js').JsonObject }));
       if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands') return write(response, 201, await host.createCommand(context, await readJson(request) as { commandType: string; actorId?: string | null; workspaceId?: string | null; subjectIds?: string[]; context?: JsonObject; payload?: JsonObject }));
+      if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands/status') return write(response, 200, await host.updateCommandStatus(context, await readJson(request) as { commandId: string; status: CoreLifecycleStatus }));
+      if (request.method === 'GET' && url.pathname === '/v1/core/runtime/commands') { const commandId = url.searchParams.get('id'); if (commandId) return write(response, 200, await host.getCommand(context, commandId)); const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined; return write(response, 200, await host.listCommands(context, { actorId: url.searchParams.has('actorId') ? url.searchParams.get('actorId') : undefined, commandTypePrefix: url.searchParams.get('commandTypePrefix') ?? undefined, status: (url.searchParams.get('status') ?? undefined) as CoreCommand['status'] | undefined, limit })); }
       if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions') return write(response, 201, await host.startExecution(context, await readJson(request) as { commandId: string; providerId?: string | null; context?: JsonObject }));
       if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete') return write(response, 200, await host.completeExecution(context, await readJson(request) as { execution: CoreExecution; status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>; resultType?: string; subjectIds?: string[]; result?: JsonObject; error?: JsonObject }));
       if (request.method === 'POST' && url.pathname === '/v1/core/runtime/events') return write(response, 201, await host.recordEvent(context, await readJson(request) as { eventType: string; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; data?: JsonObject }));
@@ -62,7 +68,7 @@ export function createCoreHostHttpServer(host: SemaCoreHost): Server {
 }
 
 export async function startCoreHostHttpServer(host: SemaCoreHost, options: CoreHostHttpOptions = {}) {
-  const server = createCoreHostHttpServer(host);
+  const server = createCoreHostHttpServer(host, options);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(options.port ?? 4310, options.hostname ?? '127.0.0.1', () => { server.off('error', reject); resolve(); });
