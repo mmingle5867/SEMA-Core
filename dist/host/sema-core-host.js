@@ -1,13 +1,34 @@
+import { SEMA_CORE_VERSION } from '../version.js';
+import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS);
+const settingsKeySet = new Set(settingsKeys);
+/**
+ * Accepts only known settings of the right type. The known keys and their types come from
+ * DEFAULT_CORE_HOST_SETTINGS, so adding a setting there makes it updatable here automatically.
+ */
 function validateSettings(input, current) {
-    const values = { ...current, ...input };
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+        throw new CoreHostValidationError('Settings update must be a JSON object');
+    }
+    const patch = input;
+    const unknownKeys = Object.keys(patch).filter((key) => !settingsKeySet.has(key));
+    if (unknownKeys.length)
+        throw new CoreHostValidationError(`Unknown Core Host setting: ${unknownKeys.join(', ')}`);
+    for (const key of settingsKeys) {
+        if (!Object.hasOwn(patch, key))
+            continue;
+        const expected = typeof DEFAULT_CORE_HOST_SETTINGS[key];
+        if (typeof patch[key] !== expected)
+            throw new CoreHostValidationError(`${key} must be a ${expected}`);
+    }
+    const values = { ...current, ...patch };
     for (const key of ['maxReservationSize', 'auditRetentionDays', 'eventRetentionDays']) {
         if (!Number.isSafeInteger(values[key]) || values[key] < 1)
-            throw new Error(`${key} must be a positive integer`);
+            throw new CoreHostValidationError(`${key} must be a positive integer`);
     }
     if (values.maxReservationSize > 100_000)
-        throw new Error('maxReservationSize cannot exceed 100000');
+        throw new CoreHostValidationError('maxReservationSize cannot exceed 100000');
     return values;
 }
 /** Installation backend: settings, operational statistics, docs, and Core runtime access. */
@@ -16,7 +37,7 @@ export class SemaCoreHost {
     store;
     authorization;
     version;
-    constructor(core, store, authorization, version = '0.2.0') {
+    constructor(core, store, authorization, version = SEMA_CORE_VERSION) {
         this.core = core;
         this.store = store;
         this.authorization = authorization;
@@ -49,8 +70,9 @@ export class SemaCoreHost {
         const current = await this.getSettings(context);
         const values = validateSettings(patch, current.values);
         const next = { ...current, values, revision: current.revision + 1, updatedAt: new Date(), updatedById: context.actorId };
-        this.core.setMaxReservationSize(values.maxReservationSize);
+        // Persist first: the running Core limit must never get ahead of what is stored.
         const saved = await this.store.saveHostSettings(next);
+        this.core.setMaxReservationSize(saved.values.maxReservationSize);
         await this.core.recordAudit({ action: 'core-host.settings.updated', actorId: context.actorId, evidence: { changedKeys: settingsKeys.filter((key) => current.values[key] !== values[key]), revision: saved.revision } });
         return saved;
     }
@@ -142,11 +164,11 @@ export class SemaCoreHost {
     }
     async requireRead(context, resource) {
         if (!(await this.authorization.canRead({ actorId: context.actorId, resource })))
-            throw new Error(`Core Host ${resource} access is not authorized`);
+            throw new CoreHostAuthorizationError(`Core Host ${resource} access is not authorized`);
     }
     async requireAdministration(context, resource) {
         if (!(await this.authorization.canAdminister({ actorId: context.actorId, resource })))
-            throw new Error(`Core Host ${resource} administration is not authorized`);
+            throw new CoreHostAuthorizationError(`Core Host ${resource} administration is not authorized`);
     }
 }
 //# sourceMappingURL=sema-core-host.js.map

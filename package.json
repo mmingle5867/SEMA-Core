@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "tsx test/core.test.ts",
+    "test": "tsx test/core.test.ts && tsx test/base56.test.ts && tsx test/core-host.test.ts && tsx test/http.test.ts && tsx test/credentials.test.ts",
     "test:host": "tsx test/core-host.test.ts",
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate",

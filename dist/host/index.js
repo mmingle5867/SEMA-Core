@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './errors.js';
 export * from './authorization.js';
 export * from './default-settings.js';
 export * from './in-memory-host-store.js';

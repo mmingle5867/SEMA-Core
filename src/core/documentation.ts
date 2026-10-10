@@ -1,3 +1,5 @@
+import { SEMA_CORE_VERSION } from '../version.js';
+
 export interface CoreDocumentationManifest {
   packageName: '@selo/sema-core';
   version: string;
@@ -10,7 +12,7 @@ export interface CoreDocumentationManifest {
 /** Machine-readable package description for SeloDoc and capability discovery tooling. */
 export function getCoreDocumentation(): CoreDocumentationManifest {
   return {
-    packageName: '@selo/sema-core', version: '0.2.0',
+    packageName: '@selo/sema-core', version: SEMA_CORE_VERSION,
     summary: 'Portable SEMA Core rules plus a local-first Core Host backend.',
     coreResponsibilities: ['identity and ID reservation', 'commands', 'executions', 'results', 'events', 'audit', 'policy', 'capability discovery and resolution'],
     hostResponsibilities: ['installation settings', 'health', 'operational statistics', 'HTTP API', 'self-documentation'],
