@@ -1,3 +1,4 @@
+export * from './version.js';
 export * from './identity/base56.js';
 export * from './core/types.js';
 export * from './core/store.js';

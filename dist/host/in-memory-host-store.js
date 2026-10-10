@@ -38,8 +38,5 @@ export class InMemorySemaCoreHostStore extends InMemorySemaCoreStore {
     }
     async getCapabilitiesForHost() { return [...this.capabilities.values()].sort((a, b) => a.displayName.localeCompare(b.displayName)); }
 }
-export const DEFAULT_CORE_HOST_SETTINGS = {
-    maxReservationSize: 100, auditRetentionDays: 3650, eventRetentionDays: 3650,
-    capabilityAutoFallback: true, documentationEnabled: true,
-};
+export { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 //# sourceMappingURL=in-memory-host-store.js.map

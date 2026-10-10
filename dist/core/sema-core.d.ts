@@ -1,5 +1,5 @@
 import type { SemaCoreStore } from './store.js';
-import type { CoreCapability, CoreCommand, CoreEvent, CoreExecution, CoreLifecycleStatus, CoreResult, JsonObject, SemaIdentifier, SemaIdentifierReservation } from './types.js';
+import type { CoreCapability, CoreCommand, CoreEvent, CoreExecution, CoreLifecycleStatus, CoreResult, JsonObject } from './types.js';
 export interface SemaCoreOptions {
     installationId: string;
     /** Configurable policy limit; no caller can silently reserve an unlimited block. */
@@ -14,18 +14,18 @@ export declare class SemaCore {
     getMaxReservationSize(): number;
     /** Installation administration may change this bounded policy at runtime. */
     setMaxReservationSize(value: number): void;
-    issueIdentifier(typeCode?: string, metadata?: JsonObject): Promise<SemaIdentifier>;
+    issueIdentifier(typeCode?: string, metadata?: JsonObject): Promise<import("./types.js").SemaIdentifier>;
     /**
      * Reserves real permanent IDs in one atomic operation. Unconsumed entries
      * remain reserved; they are never returned to the allocator or reused.
      */
     reserveIdentifiers(count: number, typeCode?: string, metadata?: JsonObject): Promise<{
-        reservation: SemaIdentifierReservation;
-        identifiers: SemaIdentifier[];
+        reservation: import("./types.js").SemaIdentifierReservation;
+        identifiers: import("./types.js").SemaIdentifier[];
     }>;
-    consumeReservedIdentifier(id: string, reservationId: string, metadata?: JsonObject): Promise<SemaIdentifier>;
+    consumeReservedIdentifier(id: string, reservationId: string, metadata?: JsonObject): Promise<import("./types.js").SemaIdentifier>;
     /** A child installation's InstallationID is a normal permanent object ID of its parent. */
-    issueChildInstallation(metadata?: JsonObject): Promise<SemaIdentifier>;
+    issueChildInstallation(metadata?: JsonObject): Promise<import("./types.js").SemaIdentifier>;
     createCommand(input: {
         commandType: string;
         actorId?: string | null;

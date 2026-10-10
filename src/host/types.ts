@@ -1,5 +1,10 @@
 import type { CoreCapability, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 
+/**
+ * Installation-level settings. `documentationEnabled`, `auditRetentionDays`, `eventRetentionDays`
+ * and `capabilityAutoFallback` are reserved for future use (self-documenting Core, retention,
+ * capability fallback policy). They are stored and validated but intentionally not acted on yet.
+ */
 export interface CoreHostSettings {
   maxReservationSize: number;
   auditRetentionDays: number;
@@ -48,7 +53,7 @@ export interface CoreHostStore {
 
 export interface CoreHostAuthorization {
   canRead(input: { actorId: string | null; resource: 'health' | 'settings' | 'statistics' | 'documentation' | 'capabilities' }): Promise<boolean>;
-  canAdminister(input: { actorId: string | null; resource: 'settings' }): Promise<boolean>;
+  canAdminister(input: { actorId: string | null; resource: 'settings' | 'identifiers' | 'runtime' }): Promise<boolean>;
 }
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }

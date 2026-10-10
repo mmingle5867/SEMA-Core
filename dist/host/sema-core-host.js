@@ -1,13 +1,34 @@
-import { DEFAULT_CORE_HOST_SETTINGS } from './in-memory-host-store.js';
+import { SEMA_CORE_VERSION } from '../version.js';
+import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
+import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS);
+const settingsKeySet = new Set(settingsKeys);
+/**
+ * Accepts only known settings of the right type. The known keys and their types come from
+ * DEFAULT_CORE_HOST_SETTINGS, so adding a setting there makes it updatable here automatically.
+ */
 function validateSettings(input, current) {
-    const values = { ...current, ...input };
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+        throw new CoreHostValidationError('Settings update must be a JSON object');
+    }
+    const patch = input;
+    const unknownKeys = Object.keys(patch).filter((key) => !settingsKeySet.has(key));
+    if (unknownKeys.length)
+        throw new CoreHostValidationError(`Unknown Core Host setting: ${unknownKeys.join(', ')}`);
+    for (const key of settingsKeys) {
+        if (!Object.hasOwn(patch, key))
+            continue;
+        const expected = typeof DEFAULT_CORE_HOST_SETTINGS[key];
+        if (typeof patch[key] !== expected)
+            throw new CoreHostValidationError(`${key} must be a ${expected}`);
+    }
+    const values = { ...current, ...patch };
     for (const key of ['maxReservationSize', 'auditRetentionDays', 'eventRetentionDays']) {
         if (!Number.isSafeInteger(values[key]) || values[key] < 1)
-            throw new Error(`${key} must be a positive integer`);
+            throw new CoreHostValidationError(`${key} must be a positive integer`);
     }
     if (values.maxReservationSize > 100_000)
-        throw new Error('maxReservationSize cannot exceed 100000');
+        throw new CoreHostValidationError('maxReservationSize cannot exceed 100000');
     return values;
 }
 /** Installation backend: settings, operational statistics, docs, and Core runtime access. */
@@ -16,7 +37,7 @@ export class SemaCoreHost {
     store;
     authorization;
     version;
-    constructor(core, store, authorization, version = '0.2.0') {
+    constructor(core, store, authorization, version = SEMA_CORE_VERSION) {
         this.core = core;
         this.store = store;
         this.authorization = authorization;
@@ -45,19 +66,63 @@ export class SemaCoreHost {
         return settings;
     }
     async updateSettings(context, patch) {
-        const allowed = await this.authorization.canAdminister({ actorId: context.actorId, resource: 'settings' });
-        if (!allowed)
-            throw new Error('Core Host settings administration is not authorized');
+        await this.requireAdministration(context, 'settings');
         const current = await this.getSettings(context);
         const values = validateSettings(patch, current.values);
         const next = { ...current, values, revision: current.revision + 1, updatedAt: new Date(), updatedById: context.actorId };
-        this.core.setMaxReservationSize(values.maxReservationSize);
+        // Persist first: the running Core limit must never get ahead of what is stored.
         const saved = await this.store.saveHostSettings(next);
+        this.core.setMaxReservationSize(saved.values.maxReservationSize);
         await this.core.recordAudit({ action: 'core-host.settings.updated', actorId: context.actorId, evidence: { changedKeys: settingsKeys.filter((key) => current.values[key] !== values[key]), revision: saved.revision } });
         return saved;
     }
     async statistics(context) { await this.requireRead(context, 'statistics'); return this.store.getHostStatistics(); }
     async capabilities(context) { await this.requireRead(context, 'capabilities'); return this.store.getCapabilitiesForHost(); }
+    async reserveIdentifiers(context, input) {
+        await this.requireAdministration(context, 'identifiers');
+        return this.core.reserveIdentifiers(input.count, input.typeCode, input.metadata ?? {});
+    }
+    async consumeReservedIdentifier(context, input) {
+        await this.requireAdministration(context, 'identifiers');
+        return this.core.consumeReservedIdentifier(input.id, input.reservationId, input.metadata ?? {});
+    }
+    /** Core runtime records live in the Core database, never in an application's database. */
+    async createCommand(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.createCommand(input);
+    }
+    async startExecution(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.startExecution(input);
+    }
+    async completeExecution(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.completeExecution(input);
+    }
+    async recordEvent(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.recordEvent(input);
+    }
+    async recordAudit(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.recordAudit(input);
+    }
+    async registerCapability(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.registerCapability(input);
+    }
+    async discoverCapabilities(context, query = '') {
+        await this.requireRead(context, 'capabilities');
+        return this.core.discoverCapabilities(query);
+    }
+    async authorizeInvocation(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.authorizeInvocation(input);
+    }
+    async resolveCapability(context, input) {
+        await this.requireAdministration(context, 'runtime');
+        return this.core.resolveCapability(input);
+    }
     async documentation(context) {
         await this.requireRead(context, 'documentation');
         return {
@@ -70,6 +135,17 @@ export class SemaCoreHost {
                 { method: 'GET', path: '/v1/core/statistics', purpose: 'Read operational totals without application business data.' },
                 { method: 'GET', path: '/v1/core/capabilities', purpose: 'List installed capability records.' },
                 { method: 'GET', path: '/v1/core/documentation', purpose: 'Read machine-readable backend documentation.' },
+                { method: 'POST', path: '/v1/core/identifiers/reservations', purpose: 'Reserve permanent identifiers for authorized local application work.' },
+                { method: 'POST', path: '/v1/core/identifiers/consume', purpose: 'Record use of a previously reserved identifier.' },
+                { method: 'POST', path: '/v1/core/runtime/commands', purpose: 'Create a Core command in the shared Core database.' },
+                { method: 'POST', path: '/v1/core/runtime/executions', purpose: 'Start a Core execution in the shared Core database.' },
+                { method: 'POST', path: '/v1/core/runtime/executions/complete', purpose: 'Complete a Core execution and optionally record its result.' },
+                { method: 'POST', path: '/v1/core/runtime/events', purpose: 'Record a Core event in the shared Core database.' },
+                { method: 'POST', path: '/v1/core/runtime/audits', purpose: 'Record a Core audit entry in the shared Core database.' },
+                { method: 'POST', path: '/v1/core/runtime/capabilities', purpose: 'Register or update a Core capability.' },
+                { method: 'GET', path: '/v1/core/runtime/capabilities', purpose: 'Discover active Core capabilities.' },
+                { method: 'POST', path: '/v1/core/runtime/capabilities/authorize', purpose: 'Authorize a Core capability invocation.' },
+                { method: 'POST', path: '/v1/core/runtime/capabilities/resolve', purpose: 'Resolve an authorized Core capability.' },
             ],
             settings: [
                 { key: 'maxReservationSize', description: 'Maximum IDs granted by one reservation request.' },
@@ -83,7 +159,11 @@ export class SemaCoreHost {
     }
     async requireRead(context, resource) {
         if (!(await this.authorization.canRead({ actorId: context.actorId, resource })))
-            throw new Error(`Core Host ${resource} access is not authorized`);
+            throw new CoreHostAuthorizationError(`Core Host ${resource} access is not authorized`);
+    }
+    async requireAdministration(context, resource) {
+        if (!(await this.authorization.canAdminister({ actorId: context.actorId, resource })))
+            throw new CoreHostAuthorizationError(`Core Host ${resource} administration is not authorized`);
     }
 }
 //# sourceMappingURL=sema-core-host.js.map

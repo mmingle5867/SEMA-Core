@@ -1,8 +1,7 @@
-import { formatKeyId, normalizeTypeCode, parseInstallationId } from '../identity/base56.js';
+import { normalizeTypeCode, parseInstallationId } from '../identity/base56.js';
 import type { SemaCoreStore } from './store.js';
 import type {
-  CoreCapability, CoreCommand, CoreEvent, CoreExecution, CoreLifecycleStatus, CoreResult,
-  JsonObject, SemaIdentifier, SemaIdentifierReservation,
+  CoreCapability, CoreCommand, CoreEvent, CoreExecution, CoreLifecycleStatus, CoreResult, JsonObject,
 } from './types.js';
 
 export interface SemaCoreOptions {
