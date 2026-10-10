@@ -1,5 +1,5 @@
 import { InMemorySemaCoreStore } from '../stores/in-memory-store.js';
-import type { CoreHostSettings, CoreHostStatistics, CoreHostStore, VersionedCoreHostSettings } from './types.js';
+import type { CoreHostStatistics, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 /** Reference host store for local development and host tests. */
 export declare class InMemorySemaCoreHostStore extends InMemorySemaCoreStore implements CoreHostStore {
     private hostSettings;
@@ -8,5 +8,5 @@ export declare class InMemorySemaCoreHostStore extends InMemorySemaCoreStore imp
     getHostStatistics(): Promise<CoreHostStatistics>;
     getCapabilitiesForHost(): Promise<import("../core/types.js").CoreCapability[]>;
 }
-export declare const DEFAULT_CORE_HOST_SETTINGS: CoreHostSettings;
+export { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 //# sourceMappingURL=in-memory-host-store.d.ts.map
