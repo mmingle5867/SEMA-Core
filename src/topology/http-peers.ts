@@ -1,5 +1,5 @@
 import type { NodeDescription } from './local-nodes.js';
-import type { NodePeer, PeerDirectory } from './conversations.js';
+import type { AddressedPeers, NodePeer } from './conversations.js';
 
 export interface PeerCredentials { applicationKey: string; secret: string }
 
@@ -36,7 +36,7 @@ export class HttpNodePeer implements NodePeer {
  * Finds a node's Core by the address stored beside the pointer that led to it. A node held on this
  * machine is answered locally. Nothing is cached, so a rehome or a moved machine never leaves stale entries here.
  */
-export class HttpPeerDirectory implements PeerDirectory {
+export class HttpPeerDirectory implements AddressedPeers {
   constructor(private readonly options: { credentials: PeerCredentials; local?: { address: string; peer: NodePeer } }) {}
   async find(nodeId: string, address?: string) {
     if (!address) return this.options.local?.peer;
@@ -44,6 +44,13 @@ export class HttpPeerDirectory implements PeerDirectory {
     const peer = new HttpNodePeer(address, this.options.credentials);
     // Reachable means it answers right now. A machine that is down or refuses us is simply not found.
     try { await peer.describe(nodeId); } catch { return undefined; }
+    return peer;
+  }
+  /** The Core at an address, or undefined when it does not answer now. Used to place a new node on a named machine. */
+  async at(address: string) {
+    if (this.options.local && address === this.options.local.address) return this.options.local.peer;
+    const peer = new HttpNodePeer(address, this.options.credentials);
+    try { await peer.describe('probe'); } catch { return undefined; }
     return peer;
   }
 }

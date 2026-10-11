@@ -24,6 +24,8 @@ export interface LocalNode {
 
 export interface LocalNodeStore {
   get(id: string): Promise<LocalNode | undefined>;
+  /** Every node held here. The table is small: one machine node plus the users placed on this machine. */
+  list(): Promise<LocalNode[]>;
   insert(node: LocalNode): Promise<void>;
   /** Reads a node, applies the change and writes it back as one step. A database store locks the row. */
   mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T }): Promise<T>;
@@ -32,6 +34,7 @@ export interface LocalNodeStore {
 export class InMemoryLocalNodeStore implements LocalNodeStore {
   readonly nodes = new Map<string, LocalNode>();
   async get(id: string) { const node = this.nodes.get(id); return node ? { ...node } : undefined; }
+  async list() { return [...this.nodes.values()].map((node) => ({ ...node })); }
   async insert(node: LocalNode) {
     if (this.nodes.has(node.id)) throw new Error(`Node already exists: ${node.id}`);
     this.nodes.set(node.id, { ...node });
@@ -61,6 +64,8 @@ export class LocalNodes {
     await this.store.insert(node);
     return this.describeNode(node);
   }
+
+  async list() { return (await this.store.list()).map((node) => this.describeNode(node)); }
 
   async describe(id: string) {
     const node = await this.store.get(id);

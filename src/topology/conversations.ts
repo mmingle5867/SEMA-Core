@@ -23,6 +23,11 @@ export interface PeerDirectory {
   find(nodeId: string, address?: string): Promise<NodePeer | undefined>;
 }
 
+/** A directory that can also reach the Core at a given address without knowing any node there yet. */
+export interface AddressedPeers extends PeerDirectory {
+  at(address: string): Promise<NodePeer | undefined>;
+}
+
 /** A node that answered, with the address it was reached at. */
 export type ReachedNode = NodeDescription & { address?: string };
 
