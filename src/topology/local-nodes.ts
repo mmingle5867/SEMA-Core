@@ -122,7 +122,7 @@ export class LocalNodes {
   retire(id: string) {
     return this.store.mutate(id, (node) => {
       this.requireActive(node);
-      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, parentAddress: node.parentAddress, childCount: node.childCount } };
+      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), childCount: node.childCount } };
     });
   }
 

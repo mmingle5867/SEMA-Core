@@ -12,7 +12,7 @@ export interface NodePeer {
   setParent(id: string, parentId: string, parentAddress?: string): Promise<NodeDescription>;
   setBasis(id: string, basis: string): Promise<{ previousBasis: string; basis: string }>;
   adjustChildCount(id: string, delta: number): Promise<{ childCount: number }>;
-  retire(id: string): Promise<{ parentId?: string; childCount: number }>;
+  retire(id: string): Promise<{ parentId?: string; parentAddress?: string; childCount: number }>;
 }
 
 /**
