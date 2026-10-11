@@ -12,6 +12,8 @@ import { encodeBase56 } from '../identity/base56.js';
 export interface LocalNode {
   id: string;
   parentId?: string;
+  /** Where to reach the parent's Core, kept as a stable name. Set whenever the pointer is set. */
+  parentAddress?: string;
   basis: string;
   /** How many values have been issued from the current basis. Never goes backwards while the basis stands. */
   issued: bigint;
@@ -44,7 +46,7 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
 }
 
 /** What any other Core may learn about a node by asking. */
-export type NodeDescription = Pick<LocalNode, 'id' | 'parentId' | 'basis' | 'childCount' | 'status'>;
+export type NodeDescription = Pick<LocalNode, 'id' | 'parentId' | 'parentAddress' | 'basis' | 'childCount' | 'status'>;
 
 const segments = (basis: string) => basis.split('-').length;
 
@@ -52,10 +54,10 @@ export class LocalNodes {
   constructor(private readonly store: LocalNodeStore) {}
 
   /** Records a node on this machine from an ID that another Core, or the central authority, issued. */
-  async accept(input: { id: string; parentId?: string }) {
+  async accept(input: { id: string; parentId?: string; parentAddress?: string }) {
     if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
     if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
-    const node: LocalNode = { id: input.id, ...(input.parentId ? { parentId: input.parentId } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
+    const node: LocalNode = { id: input.id, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
     await this.store.insert(node);
     return this.describeNode(node);
   }
@@ -83,11 +85,13 @@ export class LocalNodes {
     });
   }
 
-  setParent(id: string, parentId: string) {
+  setParent(id: string, parentId: string, parentAddress?: string) {
     return this.store.mutate(id, (node) => {
       this.requireActive(node);
       if (parentId === id) throw new Error('A node cannot be its own parent');
-      return { node: { ...node, parentId }, result: this.describeNode({ ...node, parentId }) };
+      const { parentAddress: _old, ...rest } = node;
+      const moved: LocalNode = { ...rest, parentId, ...(parentAddress ? { parentAddress } : {}) };
+      return { node: moved, result: this.describeNode(moved) };
     });
   }
 
@@ -118,10 +122,10 @@ export class LocalNodes {
   retire(id: string) {
     return this.store.mutate(id, (node) => {
       this.requireActive(node);
-      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, childCount: node.childCount } };
+      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), childCount: node.childCount } };
     });
   }
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
-  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, ...(node.parentId ? { parentId: node.parentId } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
+  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
 }

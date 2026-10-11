@@ -8,3 +8,4 @@ export * from './stores/in-memory-store.js';
 export * from './host/index.js';
 export * from './topology/local-nodes.js';
 export * from './topology/conversations.js';
+export * from './topology/http-peers.js';
