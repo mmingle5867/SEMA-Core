@@ -1,0 +1,127 @@
+import { encodeBase56 } from '../identity/base56.js';
+
+/**
+ * Nodes held by THIS Core: its own machine node and the user nodes placed on this machine.
+ * Every other node lives on another machine and is reached by asking its Core.
+ *
+ * A record holds an ID, a parent pointer (the parent's permanent ID), a basis with the counter that
+ * issues values from it, a count of direct children, and a status. Nothing else is stored.
+ * Operations that involve several machines are conversations between Cores built from the
+ * single-node operations below.
+ */
+export interface LocalNode {
+  id: string;
+  parentId?: string;
+  basis: string;
+  /** How many values have been issued from the current basis. Never goes backwards while the basis stands. */
+  issued: bigint;
+  /** Number of direct children. A parent keeps no list of them. Errs high, never low. */
+  childCount: number;
+  status: 'ACTIVE' | 'RETIRED';
+}
+
+export interface LocalNodeStore {
+  get(id: string): Promise<LocalNode | undefined>;
+  insert(node: LocalNode): Promise<void>;
+  /** Reads a node, applies the change and writes it back as one step. A database store locks the row. */
+  mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T }): Promise<T>;
+}
+
+export class InMemoryLocalNodeStore implements LocalNodeStore {
+  readonly nodes = new Map<string, LocalNode>();
+  async get(id: string) { const node = this.nodes.get(id); return node ? { ...node } : undefined; }
+  async insert(node: LocalNode) {
+    if (this.nodes.has(node.id)) throw new Error(`Node already exists: ${node.id}`);
+    this.nodes.set(node.id, { ...node });
+  }
+  async mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T }) {
+    const current = this.nodes.get(id);
+    if (!current) throw new Error(`Node does not exist on this Core: ${id}`);
+    const { node, result } = change({ ...current });
+    this.nodes.set(id, { ...node });
+    return result;
+  }
+}
+
+/** What any other Core may learn about a node by asking. */
+export type NodeDescription = Pick<LocalNode, 'id' | 'parentId' | 'basis' | 'childCount' | 'status'>;
+
+const segments = (basis: string) => basis.split('-').length;
+
+export class LocalNodes {
+  constructor(private readonly store: LocalNodeStore) {}
+
+  /** Records a node on this machine from an ID that another Core, or the central authority, issued. */
+  async accept(input: { id: string; parentId?: string }) {
+    if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
+    if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
+    const node: LocalNode = { id: input.id, ...(input.parentId ? { parentId: input.parentId } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
+    await this.store.insert(node);
+    return this.describeNode(node);
+  }
+
+  async describe(id: string) {
+    const node = await this.store.get(id);
+    return node ? this.describeNode(node) : undefined;
+  }
+
+  /** Issues the ID for a new child from this node's basis and counts the child. The child's own Core then accepts it. */
+  issueChildId(id: string) {
+    return this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const issued = node.issued + BigInt(1);
+      return { node: { ...node, issued, childCount: node.childCount + 1 }, result: { value: `${node.basis}-${encodeBase56(issued)}`, childCount: node.childCount + 1 } };
+    });
+  }
+
+  /** Issues a fresh value that another node will adopt as its basis. It is not a child, so the count is unchanged. */
+  issueBasis(id: string) {
+    return this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const issued = node.issued + BigInt(1);
+      return { node: { ...node, issued }, result: { value: `${node.basis}-${encodeBase56(issued)}` } };
+    });
+  }
+
+  setParent(id: string, parentId: string) {
+    return this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      if (parentId === id) throw new Error('A node cannot be its own parent');
+      return { node: { ...node, parentId }, result: this.describeNode({ ...node, parentId }) };
+    });
+  }
+
+  /** Adopts a shorter basis issued by a reachable ancestor. Only the basis and its counter change. */
+  setBasis(id: string, basis: string) {
+    return this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      if (segments(basis) >= segments(node.basis)) throw new Error('A roll-up must make the basis shorter');
+      if (!basis.split('-').every(Boolean)) throw new Error('A basis must be hyphen-separated non-empty segments');
+      return { node: { ...node, basis, issued: BigInt(0) }, result: { previousBasis: node.basis, basis } };
+    });
+  }
+
+  /** Moves the child count by a signed amount. It can never go below zero. */
+  adjustChildCount(id: string, delta: number) {
+    if (!Number.isSafeInteger(delta)) throw new Error('delta must be a whole number');
+    return this.store.mutate(id, (node) => {
+      const childCount = node.childCount + delta;
+      if (childCount < 0) throw new Error('A child count cannot go below zero');
+      return { node: { ...node, childCount }, result: { childCount } };
+    });
+  }
+
+  /**
+   * Retires a node. The record and its own pointer stay, so a child that was offline can follow the
+   * chain upward. The child count is returned and cleared so the caller can add it to the parent's.
+   */
+  retire(id: string) {
+    return this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, childCount: node.childCount } };
+    });
+  }
+
+  private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
+  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, ...(node.parentId ? { parentId: node.parentId } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
+}

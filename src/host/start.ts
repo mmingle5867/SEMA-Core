@@ -2,8 +2,8 @@ import { FoundationPolicyAuthorization, LocalCoreHostAuthorization } from './aut
 import { startCoreHostHttpServer } from './http-server.js';
 import { PrismaClient } from '@prisma/client';
 import { PrismaSemaCoreHostStore } from './prisma-host-store.js';
-import { SemaTopology } from '../topology/topology.js';
-import { PrismaTopologyStore } from '../topology/prisma-topology-store.js';
+import { LocalNodes } from '../topology/local-nodes.js';
+import { PrismaLocalNodeStore } from '../topology/prisma-local-node-store.js';
 import { SemaCoreHost } from './sema-core-host.js';
 import { SEMA_CORE_VERSION } from '../version.js';
 import { SemaCore } from '../core/sema-core.js';
@@ -15,7 +15,7 @@ if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('SE
 const adminIds = new Set((process.env.SEMA_CORE_ADMIN_IDS ?? '').split(',').map((value) => value.trim()).filter(Boolean));
 const prisma = new PrismaClient();
 const store = new PrismaSemaCoreHostStore(prisma);
-const topology = new SemaTopology(new PrismaTopologyStore(prisma));
+const localNodes = new LocalNodes(new PrismaLocalNodeStore(prisma));
 const core = new SemaCore(store, { installationId, maxReservationSize: 100 });
 const policyUrl = process.env.SEMA_FOUNDATION_ACCESS_URL?.replace(/\/$/, '');
 const policyKey = process.env.SEMA_POLICY_KEY ?? process.env.SEMA_CORE_POLICY_KEY;
@@ -24,7 +24,7 @@ const authorization = policyUrl && policyKey
   ? new FoundationPolicyAuthorization(policyUrl, policyKey, clients)
   : new LocalCoreHostAuthorization(adminIds);
 if (!policyUrl || !policyKey) console.warn('SEMA Core is using explicit local administrator IDs only. Configure Foundation Access policy before exposing Core beyond local transition work.');
-const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, topology);
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes);
 
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname: process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1', port, applicationClients: clients });

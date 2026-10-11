@@ -105,13 +105,14 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'GET' && url.pathname === '/v1/core/runtime/capabilities') return write(response, 200, await host.discoverCapabilities(context, url.searchParams.get('query') ?? ''));
     if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/authorize') return write(response, 200, await host.authorizeInvocation(context, await readJson(request) as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
     if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve') return write(response, 200, await host.resolveCapability(context, await readJson(request) as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
-    if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes') return write(response, 200, await host.topologyGet(context, { id: url.searchParams.get('id') ?? '' }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/top') return write(response, 201, await host.topologyRegisterTop(context, await readJson(request) as { id: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes') return write(response, 201, await host.topologyCreate(context, await readJson(request) as { parentId: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/insert') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as { childId: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/rehome') return write(response, 200, await host.topologyRehome(context, await readJson(request) as { nodeId: string; parentId: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/remove') return write(response, 200, await host.topologyRemove(context, await readJson(request) as { nodeId: string; childrenParentId?: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/rollup') return write(response, 200, await host.topologyRollUp(context, await readJson(request) as { nodeId: string; issuerId: string }));
+    if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes') return write(response, 200, await host.nodeDescribe(context, { id: url.searchParams.get('id') ?? '' }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept') return write(response, 201, await host.nodeAccept(context, await readJson(request) as { id: string; parentId?: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-child') return write(response, 201, await host.nodeIssueChild(context, await readJson(request) as { nodeId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-basis') return write(response, 201, await host.nodeIssueBasis(context, await readJson(request) as { nodeId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-parent') return write(response, 200, await host.nodeSetParent(context, await readJson(request) as { nodeId: string; parentId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-basis') return write(response, 200, await host.nodeSetBasis(context, await readJson(request) as { nodeId: string; basis: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-count') return write(response, 200, await host.nodeAdjustChildCount(context, await readJson(request) as { nodeId: string; delta: number }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire') return write(response, 200, await host.nodeRetire(context, await readJson(request) as { nodeId: string }));
     return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
   } catch (error) {
     const { status, code, message } = classify(error);
