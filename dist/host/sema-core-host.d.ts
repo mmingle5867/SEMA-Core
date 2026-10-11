@@ -1,5 +1,5 @@
 import type { SemaCore } from '../core/sema-core.js';
-import type { CoreCapability, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
+import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 /** Installation backend: settings, operational statistics, docs, and Core runtime access. */
 export declare class SemaCoreHost {
@@ -43,7 +43,18 @@ export declare class SemaCoreHost {
         subjectIds?: string[];
         context?: JsonObject;
         payload?: JsonObject;
-    }): Promise<import("../core/types.js").CoreCommand>;
+    }): Promise<CoreCommand>;
+    updateCommandStatus(context: CoreHostRequestContext, input: {
+        commandId: string;
+        status: CoreLifecycleStatus;
+    }): Promise<CoreCommand>;
+    getCommand(context: CoreHostRequestContext, commandId: string): Promise<CoreCommand | null>;
+    listCommands(context: CoreHostRequestContext, input: {
+        actorId?: string | null;
+        commandTypePrefix?: string;
+        status?: CoreCommand['status'];
+        limit?: number;
+    }): Promise<CoreCommand[]>;
     startExecution(context: CoreHostRequestContext, input: {
         commandId: string;
         providerId?: string | null;

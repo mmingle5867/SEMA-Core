@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
 const MAX_BODY_BYTES = 256 * 1024;
@@ -11,6 +12,13 @@ class HttpRequestError extends Error {
         this.code = code;
         this.name = 'HttpRequestError';
     }
+}
+function secretMatches(expected, presented) {
+    if (!expected)
+        return false;
+    const a = Buffer.from(expected);
+    const b = Buffer.from(presented);
+    return a.length === b.length && timingSafeEqual(a, b);
 }
 function serialize(value) {
     return JSON.stringify(value, (_key, item) => typeof item === 'bigint' ? item.toString() : item);
@@ -63,11 +71,19 @@ function classify(error) {
     const status = /not authorized/i.test(message) ? 403 : /JSON|Request body|must be|cannot exceed/i.test(message) ? 400 : 500;
     return { status, code: status === 403 ? 'FORBIDDEN' : status === 400 ? 'INVALID_REQUEST' : 'CORE_HOST_ERROR', message };
 }
-async function handleRequest(host, request, response) {
+async function handleRequest(host, applicationClients, request, response) {
     try {
         const url = parseRequestUrl(request.url);
-        const actorHeader = request.headers['x-sema-actor-id'];
+        const actorHeader = request.headers['x-sema-application-key'] ?? request.headers['x-sema-actor-id'];
         const actorId = typeof actorHeader === 'string' && actorHeader.trim() ? actorHeader.trim() : null;
+        // When application clients are registered, every request must prove which application is calling.
+        // The secret authenticates the application; it is never recorded as a person.
+        if (applicationClients.size > 0) {
+            const secretHeader = request.headers['x-sema-application-secret'];
+            const secret = typeof secretHeader === 'string' ? secretHeader : '';
+            if (!actorId || !secretMatches(applicationClients.get(actorId), secret))
+                throw new HttpRequestError(401, 'UNAUTHENTICATED', 'A valid SEMA application credential is required.');
+        }
         const context = { actorId };
         if (request.method === 'GET' && url.pathname === '/v1/core/health')
             return write(response, 200, await host.health(context));
@@ -87,6 +103,15 @@ async function handleRequest(host, request, response) {
             return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request)));
         if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands')
             return write(response, 201, await host.createCommand(context, await readJson(request)));
+        if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands/status')
+            return write(response, 200, await host.updateCommandStatus(context, await readJson(request)));
+        if (request.method === 'GET' && url.pathname === '/v1/core/runtime/commands') {
+            const commandId = url.searchParams.get('id');
+            if (commandId)
+                return write(response, 200, await host.getCommand(context, commandId));
+            const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined;
+            return write(response, 200, await host.listCommands(context, { actorId: url.searchParams.has('actorId') ? url.searchParams.get('actorId') : undefined, commandTypePrefix: url.searchParams.get('commandTypePrefix') ?? undefined, status: (url.searchParams.get('status') ?? undefined), limit }));
+        }
         if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions')
             return write(response, 201, await host.startExecution(context, await readJson(request)));
         if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete')
@@ -112,9 +137,10 @@ async function handleRequest(host, request, response) {
     }
 }
 /** Minimal dependency-free local API. A reverse proxy or richer transport may wrap this later. */
-export function createCoreHostHttpServer(host) {
+export function createCoreHostHttpServer(host, options = {}) {
+    const applicationClients = new Map((options.applicationClients ?? []).filter((client) => client.applicationKey && client.secret).map((client) => [client.applicationKey, client.secret]));
     return createServer((request, response) => {
-        handleRequest(host, request, response).catch(() => {
+        handleRequest(host, applicationClients, request, response).catch(() => {
             // Last resort: nothing thrown while handling one request may take the whole process down.
             try {
                 if (response.headersSent)
@@ -129,7 +155,7 @@ export function createCoreHostHttpServer(host) {
     });
 }
 export async function startCoreHostHttpServer(host, options = {}) {
-    const server = createCoreHostHttpServer(host);
+    const server = createCoreHostHttpServer(host, options);
     await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(options.port ?? 4310, options.hostname ?? '127.0.0.1', () => { server.off('error', reject); resolve(); });

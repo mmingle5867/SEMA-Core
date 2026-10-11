@@ -32,7 +32,8 @@ async function put(body: string, headers: Record<string, string> = admin) {
 assert.equal(await rawStatus('GET // HTTP/1.1'), 400);
 assert.equal(await rawStatus('GET //v1/core/health HTTP/1.1'), 400);
 assert.equal(await rawStatus('GET http://example.test/v1/core/health HTTP/1.1'), 400);
-const health = await fetch(`${base}/v1/core/health`);
+assert.equal((await fetch(`${base}/v1/core/health`)).status, 403); // anonymous callers are no longer administrators
+const health = await fetch(`${base}/v1/core/health`, { headers: admin });
 assert.equal(health.status, 200);
 assert.equal(((await health.json()) as { status: string }).status, 'ACTIVE');
 

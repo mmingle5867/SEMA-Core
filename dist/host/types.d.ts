@@ -63,11 +63,11 @@ export interface CoreHostStore {
 export interface CoreHostAuthorization {
     canRead(input: {
         actorId: string | null;
-        resource: 'health' | 'settings' | 'statistics' | 'documentation' | 'capabilities';
+        resource: string;
     }): Promise<boolean>;
     canAdminister(input: {
         actorId: string | null;
-        resource: 'settings' | 'identifiers' | 'runtime';
+        resource: string;
     }): Promise<boolean>;
 }
 export interface CoreHostRequestContext {

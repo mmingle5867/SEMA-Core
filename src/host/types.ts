@@ -52,8 +52,8 @@ export interface CoreHostStore {
 }
 
 export interface CoreHostAuthorization {
-  canRead(input: { actorId: string | null; resource: 'health' | 'settings' | 'statistics' | 'documentation' | 'capabilities' }): Promise<boolean>;
-  canAdminister(input: { actorId: string | null; resource: 'settings' | 'identifiers' | 'runtime' }): Promise<boolean>;
+  canRead(input: { actorId: string | null; resource: string }): Promise<boolean>;
+  canAdminister(input: { actorId: string | null; resource: string }): Promise<boolean>;
 }
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }

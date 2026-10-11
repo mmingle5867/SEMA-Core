@@ -66,6 +66,10 @@ export class InMemorySemaCoreStore implements SemaCoreStore {
     const command = this.commands.get(id); if (!command) throw new Error('Command not found');
     const next = { ...command, ...update }; this.commands.set(id, next); return next;
   }
+  async findCommand(id: string) { const command = this.commands.get(id); return command ? structuredClone(command) : null; }
+  async listCommands(input: { actorId?: string | null; commandTypePrefix?: string; status?: CoreCommand['status']; limit?: number }) {
+    return [...this.commands.values()].filter((command) => input.actorId === undefined || command.actorId === input.actorId).filter((command) => !input.commandTypePrefix || command.commandType.startsWith(input.commandTypePrefix)).filter((command) => !input.status || command.status === input.status).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, input.limit ?? 100).map((command) => structuredClone(command));
+  }
   async createExecution(execution: CoreExecution) { this.executions.set(execution.id, execution); return execution; }
   async updateExecution(id: string, update: Partial<Pick<CoreExecution, 'status' | 'completedAt' | 'error'>>) {
     const execution = this.executions.get(id); if (!execution) throw new Error('Execution not found');

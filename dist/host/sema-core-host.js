@@ -54,19 +54,19 @@ export class SemaCoreHost {
         return { state, settings };
     }
     async health(context) {
-        await this.requireRead(context, 'health');
+        await this.requireRead(context, 'core.health.read');
         const statistics = await this.store.getHostStatistics();
         return { status: statistics.status, installationId: statistics.installationId, version: this.version, capturedAt: statistics.capturedAt };
     }
     async getSettings(context) {
-        await this.requireRead(context, 'settings');
+        await this.requireRead(context, 'core.settings.read');
         const settings = await this.store.getHostSettings();
         if (!settings)
             throw new Error('Core Host is not initialized');
         return settings;
     }
     async updateSettings(context, patch) {
-        await this.requireAdministration(context, 'settings');
+        await this.requireAdministration(context, 'core.settings.write');
         const current = await this.getSettings(context);
         const values = validateSettings(patch, current.values);
         const next = { ...current, values, revision: current.revision + 1, updatedAt: new Date(), updatedById: context.actorId };
@@ -76,55 +76,58 @@ export class SemaCoreHost {
         await this.core.recordAudit({ action: 'core-host.settings.updated', actorId: context.actorId, evidence: { changedKeys: settingsKeys.filter((key) => current.values[key] !== values[key]), revision: saved.revision } });
         return saved;
     }
-    async statistics(context) { await this.requireRead(context, 'statistics'); return this.store.getHostStatistics(); }
-    async capabilities(context) { await this.requireRead(context, 'capabilities'); return this.store.getCapabilitiesForHost(); }
+    async statistics(context) { await this.requireRead(context, 'core.statistics.read'); return this.store.getHostStatistics(); }
+    async capabilities(context) { await this.requireRead(context, 'core.capabilities.read'); return this.store.getCapabilitiesForHost(); }
     async reserveIdentifiers(context, input) {
-        await this.requireAdministration(context, 'identifiers');
+        await this.requireAdministration(context, 'core.identifiers.reserve');
         return this.core.reserveIdentifiers(input.count, input.typeCode, input.metadata ?? {});
     }
     async consumeReservedIdentifier(context, input) {
-        await this.requireAdministration(context, 'identifiers');
+        await this.requireAdministration(context, 'core.identifiers.consume');
         return this.core.consumeReservedIdentifier(input.id, input.reservationId, input.metadata ?? {});
     }
     /** Core runtime records live in the Core database, never in an application's database. */
     async createCommand(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.commands.create');
         return this.core.createCommand(input);
     }
+    async updateCommandStatus(context, input) { await this.requireAdministration(context, 'core.commands.update'); return this.core.updateCommandStatus(input); }
+    async getCommand(context, commandId) { await this.requireRead(context, 'core.commands.read'); return this.core.getCommand(commandId); }
+    async listCommands(context, input) { await this.requireRead(context, 'core.commands.read'); return this.core.listCommands(input); }
     async startExecution(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.executions.start');
         return this.core.startExecution(input);
     }
     async completeExecution(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.executions.complete');
         return this.core.completeExecution(input);
     }
     async recordEvent(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.events.record');
         return this.core.recordEvent(input);
     }
     async recordAudit(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.audits.record');
         return this.core.recordAudit(input);
     }
     async registerCapability(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.capabilities.register');
         return this.core.registerCapability(input);
     }
     async discoverCapabilities(context, query = '') {
-        await this.requireRead(context, 'capabilities');
+        await this.requireRead(context, 'core.capabilities.read');
         return this.core.discoverCapabilities(query);
     }
     async authorizeInvocation(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.capabilities.authorize');
         return this.core.authorizeInvocation(input);
     }
     async resolveCapability(context, input) {
-        await this.requireAdministration(context, 'runtime');
+        await this.requireAdministration(context, 'core.capabilities.resolve');
         return this.core.resolveCapability(input);
     }
     async documentation(context) {
-        await this.requireRead(context, 'documentation');
+        await this.requireRead(context, 'core.documentation.read');
         return {
             packageName: '@selo/sema-core', version: this.version,
             summary: 'Local-first Core Host for settings, statistics, health, and documented access to SEMA Core runtime services.',
@@ -138,6 +141,8 @@ export class SemaCoreHost {
                 { method: 'POST', path: '/v1/core/identifiers/reservations', purpose: 'Reserve permanent identifiers for authorized local application work.' },
                 { method: 'POST', path: '/v1/core/identifiers/consume', purpose: 'Record use of a previously reserved identifier.' },
                 { method: 'POST', path: '/v1/core/runtime/commands', purpose: 'Create a Core command in the shared Core database.' },
+                { method: 'POST', path: '/v1/core/runtime/commands/status', purpose: 'Update the lifecycle status of a shared Core command.' },
+                { method: 'GET', path: '/v1/core/runtime/commands', purpose: 'Read one Core command or a bounded, filtered Core command list.' },
                 { method: 'POST', path: '/v1/core/runtime/executions', purpose: 'Start a Core execution in the shared Core database.' },
                 { method: 'POST', path: '/v1/core/runtime/executions/complete', purpose: 'Complete a Core execution and optionally record its result.' },
                 { method: 'POST', path: '/v1/core/runtime/events', purpose: 'Record a Core event in the shared Core database.' },

@@ -41,6 +41,33 @@ export declare class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostS
         workspaceId: string | null;
         createdAt: Date;
     }>;
+    findCommand(id: string): Promise<{
+        subjectIds: string[];
+        context: JsonObject;
+        payload: JsonObject;
+        status: CoreCommand["status"];
+        id: string;
+        commandType: string;
+        actorId: string | null;
+        workspaceId: string | null;
+        createdAt: Date;
+    } | null>;
+    listCommands(input: {
+        actorId?: string | null;
+        commandTypePrefix?: string;
+        status?: CoreCommand['status'];
+        limit?: number;
+    }): Promise<{
+        subjectIds: string[];
+        context: JsonObject;
+        payload: JsonObject;
+        status: CoreCommand["status"];
+        id: string;
+        commandType: string;
+        actorId: string | null;
+        workspaceId: string | null;
+        createdAt: Date;
+    }[]>;
     createExecution(execution: CoreExecution): Promise<CoreExecution>;
     updateExecution(id: string, update: Partial<Pick<CoreExecution, 'status' | 'completedAt' | 'error'>>): Promise<{
         context: JsonObject;
