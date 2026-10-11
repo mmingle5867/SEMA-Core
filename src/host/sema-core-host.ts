@@ -4,6 +4,7 @@ import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
+import type { LocalNodes } from '../topology/local-nodes.js';
 
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS) as Array<keyof CoreHostSettings>;
 const settingsKeySet = new Set<string>(settingsKeys);
@@ -39,6 +40,7 @@ export class SemaCoreHost {
     private readonly store: CoreHostStore,
     private readonly authorization: CoreHostAuthorization,
     private readonly version: string = SEMA_CORE_VERSION,
+    private readonly localNodes?: LocalNodes,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -145,6 +147,14 @@ export class SemaCoreHost {
       packageName: '@selo/sema-core', version: this.version,
       summary: 'Local-first Core Host for settings, statistics, health, and documented access to SEMA Core runtime services.',
       endpoints: [
+        { method: 'GET', path: '/v1/core/topology/nodes', purpose: 'Describe a node held by this Core: parent, basis, child count and status (query: id).' },
+        { method: 'POST', path: '/v1/core/topology/nodes/accept', purpose: 'Record a node on this machine from an ID that another Core issued.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/issue-child', purpose: 'Issue the ID for a new child from a node\'s basis and count the child.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/issue-basis', purpose: 'Issue a fresh value another node will adopt as its basis in a roll-up.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/set-parent', purpose: 'Change a node\'s parent pointer.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/set-basis', purpose: 'Adopt a shorter basis after a roll-up and restart its counter.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/child-count', purpose: 'Move a node\'s child count by a signed amount, never below zero.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/retire', purpose: 'Retire a node and return its child count so the parent can absorb it.' },
         { method: 'GET', path: '/v1/core/health', purpose: 'Read Core availability and installation identity.' },
         { method: 'GET', path: '/v1/core/settings', purpose: 'Read installation-level Core settings.' },
         { method: 'PUT', path: '/v1/core/settings', purpose: 'Update authorized installation-level Core settings.' },
@@ -175,6 +185,25 @@ export class SemaCoreHost {
       statisticGroups: ['identity reservations and issuance', 'commands', 'executions', 'results', 'events', 'audit', 'capabilities'],
     };
   }
+
+  // Nodes held by this Core. Operations across machines are conversations between Cores built from these.
+  private requireNodes() { if (!this.localNodes) throw new CoreHostValidationError('Local nodes are not enabled on this Core'); return this.localNodes; }
+  private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
+  private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({})) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const result = await work(this.requireNodes());
+    await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
+    return result;
+  }
+  /** What any authorized caller, including another Core walking up the tree, may learn about a node held here. */
+  async nodeDescribe(context: CoreHostRequestContext, input: { id: string }) { await this.requireRead(context, 'core.topology.read'); return (await this.requireNodes().describe(this.text(input.id, 'id'))) ?? null; }
+  nodeAccept(context: CoreHostRequestContext, input: { id: string; parentId?: string }) { const id = this.text(input.id, 'id'); const parentId = input.parentId === undefined ? undefined : this.text(input.parentId, 'parentId'); return this.nodeChange(context, 'core.topology.node-accepted', [id, ...(parentId ? [parentId] : [])], (nodes) => nodes.accept({ id, parentId })); }
+  nodeIssueChild(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.child-id-issued', [nodeId], (nodes) => nodes.issueChildId(nodeId), (result) => ({ value: result.value, childCount: result.childCount })); }
+  nodeIssueBasis(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.basis-issued', [nodeId], (nodes) => nodes.issueBasis(nodeId), (result) => ({ value: result.value })); }
+  nodeSetParent(context: CoreHostRequestContext, input: { nodeId: string; parentId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const parentId = this.text(input.parentId, 'parentId'); return this.nodeChange(context, 'core.topology.parent-set', [nodeId, parentId], (nodes) => nodes.setParent(nodeId, parentId)); }
+  nodeSetBasis(context: CoreHostRequestContext, input: { nodeId: string; basis: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const basis = this.text(input.basis, 'basis'); return this.nodeChange(context, 'core.topology.basis-set', [nodeId], (nodes) => nodes.setBasis(nodeId, basis), (result) => ({ previousBasis: result.previousBasis, basis: result.basis })); }
+  nodeAdjustChildCount(context: CoreHostRequestContext, input: { nodeId: string; delta: number }) { const nodeId = this.text(input.nodeId, 'nodeId'); if (typeof input.delta !== 'number') throw new CoreHostValidationError('delta must be a number'); return this.nodeChange(context, 'core.topology.child-count-adjusted', [nodeId], (nodes) => nodes.adjustChildCount(nodeId, input.delta), (result) => ({ delta: input.delta, childCount: result.childCount })); }
+  nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount })); }
 
   private async requireRead(context: CoreHostRequestContext, resource: string) {
     if (!(await this.authorization.canRead({ actorId: context.actorId, resource }))) throw new CoreHostAuthorizationError(`Core Host ${resource} access is not authorized`);
