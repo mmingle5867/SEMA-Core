@@ -6,3 +6,4 @@ export * from './core/sema-core.js';
 export * from './core/documentation.js';
 export * from './stores/in-memory-store.js';
 export * from './host/index.js';
+export * from './topology/topology.js';
