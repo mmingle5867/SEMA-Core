@@ -9,11 +9,16 @@ const object = (value: Prisma.JsonValue | null): JsonObject => value && typeof v
 const strings = (value: Prisma.JsonValue): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 const counts = () => ({ PENDING: 0, RUNNING: 0, WAITING: 0, CANCELLED: 0, FAILED: 0, SUCCESS: 0 });
 
+/**
+ * The machine's own node is the single source of truth for the prefix and counter that every ID this Core
+ * issues is built from. A roll-up of the machine node changes the prefix and restarts the counter here too.
+ */
 async function reserve(tx: Db, input: { count: number; typeCode?: string; metadata: JsonObject }) {
   const rows = await tx.$queryRaw<Array<{ installationId: string; localValue: bigint }>>`
-    UPDATE "sema_core_identity_state" SET "nextLocalId" = "nextLocalId" + ${BigInt(input.count)}, "updatedAt" = NOW()
-    WHERE "stateKey" = ${STATE_KEY} AND "status" = 'ACTIVE'
-    RETURNING "installationId", "nextLocalId" - ${BigInt(input.count)} AS "localValue"
+    UPDATE "sema_local_nodes" AS n SET "issued" = n."issued" + ${BigInt(input.count)}, "updatedAt" = NOW()
+    FROM "sema_core_identity_state" AS s
+    WHERE s."stateKey" = ${STATE_KEY} AND s."status" = 'ACTIVE' AND n."id" = s."installationId" AND n."status" = 'ACTIVE'
+    RETURNING n."basis" AS "installationId", n."issued" - ${BigInt(input.count)} + 1 AS "localValue"
   `;
   const first = rows[0];
   if (!first) throw new Error('SEMA Core KeyID allocator is unavailable');
@@ -35,10 +40,24 @@ async function reserve(tx: Db, input: { count: number; typeCode?: string; metada
 export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
   constructor(private readonly prisma = new PrismaClient()) {}
   async disconnect() { await this.prisma.$disconnect(); }
+  /** This machine's node: its current basis and how many values it has issued from it. */
+  private async machineNode() {
+    const rows = await this.prisma.$queryRaw<Array<{ basis: string; issued: bigint; status: string }>>`
+      SELECT n."basis", n."issued", n."status" FROM "sema_local_nodes" n JOIN "sema_core_identity_state" s ON s."installationId" = n."id" WHERE s."stateKey" = ${STATE_KEY}`;
+    const row = rows[0];
+    if (!row || row.status !== 'ACTIVE') throw new Error('SEMA Core machine node is unavailable');
+    return { basis: row.basis, issued: BigInt(row.issued) };
+  }
   async initializeIdentity(installationId: string) {
     const state = await this.prisma.semaCoreIdentityState.upsert({ where: { stateKey: STATE_KEY }, update: {}, create: { stateKey: STATE_KEY, installationId, nextLocalId: BigInt(1) } });
     if (state.installationId !== installationId || state.status !== 'ACTIVE') throw new Error('SEMA Core installation is unavailable');
-    return { installationId: state.installationId, nextLocalId: state.nextLocalId, status: state.status as 'ACTIVE' | 'SUSPENDED' };
+    // The machine node is created on first start from the existing counter, so IDs already issued are untouched.
+    await this.prisma.$executeRaw`
+      INSERT INTO "sema_local_nodes" ("id", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
+      VALUES (${installationId}, NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, 0, 'ACTIVE', NOW(), NOW())
+      ON CONFLICT ("id") DO NOTHING`;
+    const node = await this.machineNode();
+    return { installationId: state.installationId, nextLocalId: node.issued + BigInt(1), status: state.status as 'ACTIVE' | 'SUSPENDED' };
   }
   async reserveIdentifiers(input: { count: number; typeCode?: string; metadata: JsonObject }) { return this.prisma.$transaction((tx) => reserve(tx, input)); }
   async consumeReservedIdentifier(reservationId: string, id: string, metadata: JsonObject = {}) {
@@ -68,10 +87,11 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
   async getHostStatistics(): Promise<CoreHostStatistics> {
     const [state, identifiers, reservations, commandRows, executionRows, results, events, auditEntries, capabilityRows] = await Promise.all([this.prisma.semaCoreIdentityState.findUnique({ where: { stateKey: STATE_KEY } }), this.prisma.semaIssuedIdentifier.groupBy({ by: ['status'], _count: true }), this.prisma.semaIdentifierReservation.count(), this.prisma.semaCoreCommand.groupBy({ by: ['status'], _count: true }), this.prisma.semaCoreExecution.groupBy({ by: ['status'], _count: true }), this.prisma.semaCoreResult.count(), this.prisma.semaCoreEvent.count(), this.prisma.semaCoreAuditEntry.count(), this.prisma.semaCoreCapability.groupBy({ by: ['status'], _count: true })]);
     if (!state) throw new Error('SEMA Core is not initialized');
+    const machine = await this.machineNode();
     const commands = counts(); const executions = counts();
     for (const row of commandRows) if (row.status in commands) commands[row.status as keyof typeof commands] = row._count;
     for (const row of executionRows) if (row.status in executions) executions[row.status as keyof typeof executions] = row._count;
     const byStatus = (rows: Array<{ status: string; _count: number }>, status: string) => rows.find((row) => row.status === status)?._count ?? 0;
-    return { installationId: state.installationId, status: state.status as 'ACTIVE' | 'SUSPENDED', nextLocalId: state.nextLocalId, identifiers: { reserved: byStatus(identifiers, 'RESERVED'), issued: byStatus(identifiers, 'ISSUED'), reservations }, commands, executions, results, events, auditEntries, capabilities: { active: byStatus(capabilityRows, 'ACTIVE'), inactive: byStatus(capabilityRows, 'INACTIVE'), deprecated: byStatus(capabilityRows, 'DEPRECATED') }, capturedAt: new Date() };
+    return { installationId: state.installationId, status: state.status as 'ACTIVE' | 'SUSPENDED', nextLocalId: machine.issued + BigInt(1), identifiers: { reserved: byStatus(identifiers, 'RESERVED'), issued: byStatus(identifiers, 'ISSUED'), reservations }, commands, executions, results, events, auditEntries, capabilities: { active: byStatus(capabilityRows, 'ACTIVE'), inactive: byStatus(capabilityRows, 'INACTIVE'), deprecated: byStatus(capabilityRows, 'DEPRECATED') }, capturedAt: new Date() };
   }
 }
