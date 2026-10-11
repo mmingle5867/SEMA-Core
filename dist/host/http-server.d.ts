@@ -1,12 +1,13 @@
 import { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { SemaCoreHost } from './sema-core-host.js';
+export interface CoreApplicationClient {
+    applicationKey: string;
+    secret: string;
+}
 export interface CoreHostHttpOptions {
     hostname?: string;
     port?: number;
-    applicationClients?: Array<{
-        applicationKey: string;
-        secret: string;
-    }>;
+    applicationClients?: CoreApplicationClient[];
 }
 /** Minimal dependency-free local API. A reverse proxy or richer transport may wrap this later. */
 export declare function createCoreHostHttpServer(host: SemaCoreHost, options?: CoreHostHttpOptions): Server;

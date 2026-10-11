@@ -2,6 +2,7 @@ import { FoundationPolicyAuthorization, LocalCoreHostAuthorization } from './aut
 import { startCoreHostHttpServer } from './http-server.js';
 import { PrismaSemaCoreHostStore } from './prisma-host-store.js';
 import { SemaCoreHost } from './sema-core-host.js';
+import { SEMA_CORE_VERSION } from '../version.js';
 import { SemaCore } from '../core/sema-core.js';
 const installationId = process.env.SEMA_CORE_INSTALLATION_ID;
 if (!installationId)
@@ -20,10 +21,10 @@ const authorization = policyUrl && policyKey
     : new LocalCoreHostAuthorization(adminIds);
 if (!policyUrl || !policyKey)
     console.warn('SEMA Core is using explicit local administrator IDs only. Configure Foundation Access policy before exposing Core beyond local transition work.');
-const host = new SemaCoreHost(core, store, authorization, '0.2.8');
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION);
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname: process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1', port, applicationClients: clients });
-console.log(`SEMA Core v0.2.8 listening on http://${process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1'}:${port}`);
+console.log(`SEMA Core v${SEMA_CORE_VERSION} listening on http://${process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1'}:${port}`);
 for (const signal of ['SIGINT', 'SIGTERM'])
     process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));
 //# sourceMappingURL=start.js.map
