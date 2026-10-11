@@ -11,6 +11,10 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
     const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "parentId", "parentAddress", "basis", "issued", "childCount", "status" FROM "sema_local_nodes" WHERE "id" = ${id}`;
     return rows[0] ? toNode(rows[0]) : undefined;
   }
+  async list() {
+    const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "parentId", "parentAddress", "basis", "issued", "childCount", "status" FROM "sema_local_nodes" ORDER BY "id"`;
+    return rows.map(toNode);
+  }
   async insert(node: LocalNode) {
     const inserted = await this.prisma.$executeRaw`
       INSERT INTO "sema_local_nodes" ("id", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")

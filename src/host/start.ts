@@ -3,6 +3,7 @@ import { startCoreHostHttpServer } from './http-server.js';
 import { PrismaClient } from '@prisma/client';
 import { PrismaSemaCoreHostStore } from './prisma-host-store.js';
 import { LocalNodes } from '../topology/local-nodes.js';
+import { HttpPeerDirectory } from '../topology/http-peers.js';
 import { PrismaLocalNodeStore } from '../topology/prisma-local-node-store.js';
 import { SemaCoreHost } from './sema-core-host.js';
 import { SEMA_CORE_VERSION } from '../version.js';
@@ -24,7 +25,16 @@ const authorization = policyUrl && policyKey
   ? new FoundationPolicyAuthorization(policyUrl, policyKey, clients)
   : new LocalCoreHostAuthorization(adminIds);
 if (!policyUrl || !policyKey) console.warn('SEMA Core is using explicit local administrator IDs only. Configure Foundation Access policy before exposing Core beyond local transition work.');
-const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes);
+// How this Core reaches the others. SEMA_CORE_ADDRESS is the stable name other Cores use for this one;
+// SEMA_CORE_PEER_APPLICATION_KEY and SEMA_CORE_PEER_SECRET are the shared credential presented to them (later: per-machine keys).
+const ownAddress = process.env.SEMA_CORE_ADDRESS?.replace(/\/$/, '');
+const peerKey = process.env.SEMA_CORE_PEER_APPLICATION_KEY;
+const peerSecret = process.env.SEMA_CORE_PEER_SECRET;
+const topology = peerKey && peerSecret
+  ? { address: ownAddress, peers: new HttpPeerDirectory({ credentials: { applicationKey: peerKey, secret: peerSecret }, local: { address: ownAddress ?? '', peer: localNodes } }) }
+  : undefined;
+if (!topology) console.warn('SEMA_CORE_PEER_APPLICATION_KEY / SEMA_CORE_PEER_SECRET are not set: this Core cannot hold conversations with other Cores.');
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology);
 
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname: process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1', port, applicationClients: clients });

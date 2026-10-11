@@ -113,6 +113,14 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-basis') return write(response, 200, await host.nodeSetBasis(context, await readJson(request) as { nodeId: string; basis: string }));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-count') return write(response, 200, await host.nodeAdjustChildCount(context, await readJson(request) as { nodeId: string; delta: number }));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire') return write(response, 200, await host.nodeRetire(context, await readJson(request) as { nodeId: string }));
+    if (request.method === 'GET' && url.pathname === '/v1/core/topology/local') return write(response, 200, await host.topologyLocal(context));
+    if (request.method === 'GET' && url.pathname === '/v1/core/topology/walk-up') return write(response, 200, await host.topologyWalkUp(context, { nodeId: url.searchParams.get('nodeId') ?? '', nodeAddress: url.searchParams.get('nodeAddress') ?? undefined }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/create') return write(response, 201, await host.topologyCreate(context, await readJson(request) as Parameters<typeof host.topologyCreate>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as Parameters<typeof host.topologyInsertAbove>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/rehome') return write(response, 200, await host.topologyRehome(context, await readJson(request) as Parameters<typeof host.topologyRehome>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/remove') return write(response, 200, await host.topologyRemove(context, await readJson(request) as Parameters<typeof host.topologyRemove>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/roll-up') return write(response, 200, await host.topologyRollUp(context, await readJson(request) as Parameters<typeof host.topologyRollUp>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/repair-parent') return write(response, 200, await host.topologyRepairParent(context, await readJson(request) as Parameters<typeof host.topologyRepairParent>[1]));
     return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
   } catch (error) {
     const { status, code, message } = classify(error);

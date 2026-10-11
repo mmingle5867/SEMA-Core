@@ -5,6 +5,10 @@ import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, J
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import type { LocalNodes } from '../topology/local-nodes.js';
+import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
+
+/** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
+export interface CoreTopologyOptions { peers: AddressedPeers; address?: string }
 
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS) as Array<keyof CoreHostSettings>;
 const settingsKeySet = new Set<string>(settingsKeys);
@@ -41,6 +45,7 @@ export class SemaCoreHost {
     private readonly authorization: CoreHostAuthorization,
     private readonly version: string = SEMA_CORE_VERSION,
     private readonly localNodes?: LocalNodes,
+    private readonly topology?: CoreTopologyOptions,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -155,6 +160,14 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/set-basis', purpose: 'Adopt a shorter basis after a roll-up and restart its counter.' },
         { method: 'POST', path: '/v1/core/topology/nodes/child-count', purpose: 'Move a node\'s child count by a signed amount, never below zero.' },
         { method: 'POST', path: '/v1/core/topology/nodes/retire', purpose: 'Retire a node and return its child count so the parent can absorb it.' },
+        { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds and the address other Cores use to reach it.' },
+        { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
+        { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node under a parent, here or on another machine: installs a machine or adds a user.' },
+        { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node between a node and its parent.' },
+        { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
+        { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
+        { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
+        { method: 'POST', path: '/v1/core/topology/repair-parent', purpose: 'Point a node whose parent was retired at its nearest live ancestor.' },
         { method: 'GET', path: '/v1/core/health', purpose: 'Read Core availability and installation identity.' },
         { method: 'GET', path: '/v1/core/settings', purpose: 'Read installation-level Core settings.' },
         { method: 'PUT', path: '/v1/core/settings', purpose: 'Update authorized installation-level Core settings.' },
@@ -204,6 +217,70 @@ export class SemaCoreHost {
   nodeSetBasis(context: CoreHostRequestContext, input: { nodeId: string; basis: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const basis = this.text(input.basis, 'basis'); return this.nodeChange(context, 'core.topology.basis-set', [nodeId], (nodes) => nodes.setBasis(nodeId, basis), (result) => ({ previousBasis: result.previousBasis, basis: result.basis })); }
   nodeAdjustChildCount(context: CoreHostRequestContext, input: { nodeId: string; delta: number }) { const nodeId = this.text(input.nodeId, 'nodeId'); if (typeof input.delta !== 'number') throw new CoreHostValidationError('delta must be a number'); return this.nodeChange(context, 'core.topology.child-count-adjusted', [nodeId], (nodes) => nodes.adjustChildCount(nodeId, input.delta), (result) => ({ delta: input.delta, childCount: result.childCount })); }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount })); }
+
+  // Operations across machines. This Core runs the conversation; the other Cores are reached at their stored addresses.
+  private conversations() {
+    if (!this.topology) throw new CoreHostValidationError('Core-to-Core conversations are not configured on this Core');
+    return new Conversations(this.topology.peers);
+  }
+  /** Where this Core can be reached by the others. A node held here is recorded with this address beside any pointer to it. */
+  private ownAddress() { return this.topology?.address; }
+  private address(value: unknown, name: string) { return value === undefined || value === null || value === '' ? this.ownAddress() : this.text(value, name); }
+  private async placement(address: string | undefined): Promise<NodePeer> {
+    if (!address || address === this.ownAddress()) return this.requireNodes();
+    const peer = await this.topology?.peers.at(address);
+    if (!peer) throw new CoreHostValidationError(`The Core at ${address} is not reachable`);
+    return peer;
+  }
+  private async conversation<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (talk: Conversations) => Promise<T>, evidence: (result: T) => JsonObject = () => ({})) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const result = await work(this.conversations());
+    await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
+    return result;
+  }
+  /** The nodes this Core holds, with the address others use to reach it. */
+  async topologyLocal(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return { address: this.ownAddress() ?? null, nodes: await this.requireNodes().list() }; }
+  /** Walks up from a node, one parent at a time, stopping where a machine cannot be reached. */
+  async topologyWalkUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) { await this.requireRead(context, 'core.topology.read'); return this.conversations().walkUp(this.text(input.nodeId, 'nodeId'), this.address(input.nodeAddress, 'nodeAddress')); }
+  /** Creates a node under a parent, on this machine or on the Core at newNodeAddress. Installing a machine and adding a user are this operation. */
+  topologyCreate(context: CoreHostRequestContext, input: { parentId: string; parentAddress?: string; newNodeAddress?: string }) {
+    const parentId = this.text(input.parentId, 'parentId');
+    return this.conversation(context, 'core.topology.node-created', [parentId], async (talk) => {
+      const parentAddress = this.address(input.parentAddress, 'parentAddress');
+      const newNodeAddress = this.address(input.newNodeAddress, 'newNodeAddress');
+      const created = await talk.createNode({ parentId, parentAddress, newNodePeer: await this.placement(newNodeAddress) });
+      return { ...created, address: newNodeAddress ?? null };
+    }, (result) => ({ id: result.id, parentId, address: result.address }));
+  }
+  /** Inserts a new node between a node and its parent. */
+  topologyInsertAbove(context: CoreHostRequestContext, input: { childId: string; childAddress?: string; newNodeAddress?: string }) {
+    const childId = this.text(input.childId, 'childId');
+    return this.conversation(context, 'core.topology.node-inserted', [childId], async (talk) => {
+      const newNodeAddress = this.address(input.newNodeAddress, 'newNodeAddress');
+      const inserted = await talk.insertAbove({ childId, childAddress: this.address(input.childAddress, 'childAddress'), newNodePeer: await this.placement(newNodeAddress), newNodeAddress });
+      return { ...inserted, address: newNodeAddress ?? null };
+    }, (result) => ({ id: result.id, parentId: result.parentId, address: result.address }));
+  }
+  /** Moves a node and everything below it under a new parent. Only a move under itself is refused. */
+  topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), newParentId = this.text(input.newParentId, 'newParentId');
+    return this.conversation(context, 'core.topology.node-rehomed', [nodeId, newParentId], (talk) => talk.rehome({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), newParentId, newParentAddress: this.address(input.newParentAddress, 'newParentAddress'), administratorOverride: input.administratorOverride === true }), (result) => ({ changed: result.changed, administratorOverride: input.administratorOverride === true }));
+  }
+  topologyRemove(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; childrenParentId?: string; childrenParentAddress?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    const childrenParentId = input.childrenParentId ? this.text(input.childrenParentId, 'childrenParentId') : undefined;
+    return this.conversation(context, 'core.topology.node-removed', [nodeId, ...(childrenParentId ? [childrenParentId] : [])], (talk) => talk.remove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), childrenParentId, childrenParentAddress: childrenParentId ? this.address(input.childrenParentAddress, 'childrenParentAddress') : undefined }), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount }));
+  }
+  /** Shortens a node's basis using the highest reachable ancestor, or the named one. */
+  topologyRollUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; issuerId?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    return this.conversation(context, 'core.topology.node-rolled-up', [nodeId], (talk) => talk.rollUp({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), issuerId: input.issuerId ? this.text(input.issuerId, 'issuerId') : undefined }), (result) => ({ issuerId: result.issuerId, previousBasis: result.previousBasis, basis: result.basis }));
+  }
+  /** A child whose parent was retired follows the chain up and points itself at the nearest live ancestor. */
+  topologyRepairParent(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    return this.conversation(context, 'core.topology.parent-repaired', [nodeId], (talk) => talk.repairParent(nodeId, this.address(input.nodeAddress, 'nodeAddress')), (result) => ({ changed: result.changed }));
+  }
 
   private async requireRead(context: CoreHostRequestContext, resource: string) {
     if (!(await this.authorization.canRead({ actorId: context.actorId, resource }))) throw new CoreHostAuthorizationError(`Core Host ${resource} access is not authorized`);
