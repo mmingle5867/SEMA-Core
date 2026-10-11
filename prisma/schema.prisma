@@ -147,3 +147,31 @@ model SemaCoreHostSettings {
 
   @@map("sema_core_host_settings")
 }
+
+model SemaTopologyNode {
+  id        String   @id
+  parentId  String?
+  basis     String
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@map("sema_topology_nodes")
+}
+
+model SemaTopologyCounter {
+  basis     String @id
+  lastValue BigInt @default(0)
+
+  @@map("sema_topology_counters")
+}
+
+model SemaTopologyHolder {
+  value    String   @id
+  holderId String
+  issuedAt DateTime @default(now())
+
+  @@index([holderId])
+  @@map("sema_topology_holders")
+}

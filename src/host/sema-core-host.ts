@@ -4,6 +4,7 @@ import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
+import type { SemaTopology } from '../topology/topology.js';
 
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS) as Array<keyof CoreHostSettings>;
 const settingsKeySet = new Set<string>(settingsKeys);
@@ -39,6 +40,7 @@ export class SemaCoreHost {
     private readonly store: CoreHostStore,
     private readonly authorization: CoreHostAuthorization,
     private readonly version: string = SEMA_CORE_VERSION,
+    private readonly topology?: SemaTopology,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -145,6 +147,13 @@ export class SemaCoreHost {
       packageName: '@selo/sema-core', version: this.version,
       summary: 'Local-first Core Host for settings, statistics, health, and documented access to SEMA Core runtime services.',
       endpoints: [
+        { method: 'GET', path: '/v1/core/topology/nodes', purpose: 'Read a node with its children and ancestors (query: id).' },
+        { method: 'POST', path: '/v1/core/topology/nodes/top', purpose: 'Register a top-level node whose ID the central authority allocated.' },
+        { method: 'POST', path: '/v1/core/topology/nodes', purpose: 'Create a node. The parent issues its ID from its current basis.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/insert', purpose: 'Insert a new node above an existing one. Only two pointers change.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/rehome', purpose: 'Move a node and its subtree under a new parent.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/remove', purpose: 'Retire a node and give its children to its parent.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/rollup', purpose: 'Shorten a node\'s issuing basis using a reachable ancestor.' },
         { method: 'GET', path: '/v1/core/health', purpose: 'Read Core availability and installation identity.' },
         { method: 'GET', path: '/v1/core/settings', purpose: 'Read installation-level Core settings.' },
         { method: 'PUT', path: '/v1/core/settings', purpose: 'Update authorized installation-level Core settings.' },
@@ -174,6 +183,49 @@ export class SemaCoreHost {
       ],
       statisticGroups: ['identity reservations and issuance', 'commands', 'executions', 'results', 'events', 'audit', 'capabilities'],
     };
+  }
+
+  // Node topology. Core owns the tree: one parent pointer per node, and the basis that issues new IDs.
+  private requireTopology() { if (!this.topology) throw new CoreHostValidationError('Node topology is not enabled on this Core'); return this.topology; }
+  private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
+  async topologyGet(context: CoreHostRequestContext, input: { id: string }) { await this.requireRead(context, 'core.topology.read'); const topology = this.requireTopology(); const node = await topology.getNode(this.text(input.id, 'id')); return { node: node ?? null, children: node ? await topology.childrenOf(node.id) : [], ancestors: node ? await topology.ancestors(node.id) : [] }; }
+  async topologyRegisterTop(context: CoreHostRequestContext, input: { id: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const node = await this.requireTopology().registerTopNode(this.text(input.id, 'id'));
+    await this.core.recordAudit({ action: 'core.topology.top-registered', actorId: context.actorId, subjectIds: [node.id], evidence: {} });
+    return node;
+  }
+  async topologyCreate(context: CoreHostRequestContext, input: { parentId: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const node = await this.requireTopology().createNode({ parentId: this.text(input.parentId, 'parentId') });
+    await this.core.recordAudit({ action: 'core.topology.node-created', actorId: context.actorId, subjectIds: [node.id, input.parentId], evidence: {} });
+    return node;
+  }
+  async topologyInsertAbove(context: CoreHostRequestContext, input: { childId: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const node = await this.requireTopology().insertAbove({ childId: this.text(input.childId, 'childId') });
+    await this.core.recordAudit({ action: 'core.topology.node-inserted', actorId: context.actorId, subjectIds: [node.id, input.childId], evidence: { parentId: node.parentId ?? null } });
+    return node;
+  }
+  async topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; parentId: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const node = await this.requireTopology().rehome({ nodeId: this.text(input.nodeId, 'nodeId'), parentId: this.text(input.parentId, 'parentId') });
+    await this.core.recordAudit({ action: 'core.topology.node-rehomed', actorId: context.actorId, subjectIds: [input.nodeId, input.parentId], evidence: {} });
+    return node;
+  }
+  async topologyRemove(context: CoreHostRequestContext, input: { nodeId: string; childrenParentId?: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const result = await this.requireTopology().remove({ nodeId: this.text(input.nodeId, 'nodeId'), childrenParentId: input.childrenParentId === undefined ? undefined : this.text(input.childrenParentId, 'childrenParentId') });
+    await this.core.recordAudit({ action: 'core.topology.node-removed', actorId: context.actorId, subjectIds: [input.nodeId, ...result.repointed], evidence: { newParentId: result.parentId ?? null } });
+    return result;
+  }
+  /** Every node held in this Core's own store counts as reachable. Reaching nodes held by other machines needs sync and comes later. */
+  async topologyRollUp(context: CoreHostRequestContext, input: { nodeId: string; issuerId: string }) {
+    await this.requireAdministration(context, 'core.topology.write');
+    const topology = this.requireTopology();
+    const result = await topology.rollUp({ nodeId: this.text(input.nodeId, 'nodeId'), issuerId: this.text(input.issuerId, 'issuerId'), isReachable: async (id) => (await topology.getNode(id)) !== undefined });
+    await this.core.recordAudit({ action: 'core.topology.basis-rolled-up', actorId: context.actorId, subjectIds: [input.nodeId, input.issuerId], evidence: { previousBasis: result.previousBasis, basis: result.basis } });
+    return result;
   }
 
   private async requireRead(context: CoreHostRequestContext, resource: string) {
