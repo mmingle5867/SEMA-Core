@@ -1,4 +1,4 @@
-import type { NodeDescription } from './local-nodes.js';
+import type { NodeDescription, NodeKind } from './local-nodes.js';
 import type { AddressedPeers, NodePeer } from './conversations.js';
 
 export interface PeerCredentials { applicationKey: string; secret: string }
@@ -23,7 +23,7 @@ export class HttpNodePeer implements NodePeer {
   }
 
   async describe(id: string) { return (await this.call<NodeDescription | null>('GET', `?id=${encodeURIComponent(id)}`)) ?? undefined; }
-  accept(input: { id: string; parentId?: string; parentAddress?: string }) { return this.call<NodeDescription>('POST', '/accept', input); }
+  accept(input: { id: string; kind: NodeKind; parentId?: string; parentAddress?: string }) { return this.call<NodeDescription>('POST', '/accept', input); }
   issueChildId(id: string) { return this.call<{ value: string; childCount: number }>('POST', '/issue-child', { nodeId: id }); }
   issueBasis(id: string) { return this.call<{ value: string }>('POST', '/issue-basis', { nodeId: id }); }
   setParent(id: string, parentId: string, parentAddress?: string) { return this.call<NodeDescription>('POST', '/set-parent', { nodeId: id, parentId, parentAddress }); }

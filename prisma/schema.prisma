@@ -150,6 +150,7 @@ model SemaCoreHostSettings {
 
 model SemaLocalNode {
   id         String   @id
+  kind       String
   parentId   String?
   parentAddress String?
   basis      String
