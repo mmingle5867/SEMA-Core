@@ -51,10 +51,10 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
   async initializeIdentity(installationId: string) {
     const state = await this.prisma.semaCoreIdentityState.upsert({ where: { stateKey: STATE_KEY }, update: {}, create: { stateKey: STATE_KEY, installationId, nextLocalId: BigInt(1) } });
     if (state.installationId !== installationId || state.status !== 'ACTIVE') throw new Error('SEMA Core installation is unavailable');
-    // The machine node is created on first start from the existing counter, so IDs already issued are untouched.
+    // The machine node is created on first start from the existing counter, so IDs already issued are untouched. A machine is an ASSET node.
     await this.prisma.$executeRaw`
-      INSERT INTO "sema_local_nodes" ("id", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
-      VALUES (${installationId}, NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, 0, 'ACTIVE', NOW(), NOW())
+      INSERT INTO "sema_local_nodes" ("id", "kind", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
+      VALUES (${installationId}, 'ASSET', NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, 0, 'ACTIVE', NOW(), NOW())
       ON CONFLICT ("id") DO NOTHING`;
     const node = await this.machineNode();
     return { installationId: state.installationId, nextLocalId: node.issued + BigInt(1), status: state.status as 'ACTIVE' | 'SUSPENDED' };
