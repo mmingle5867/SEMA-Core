@@ -7,13 +7,13 @@ const m3 = machine(), m33 = machine(), m333 = machine(), m3333 = machine();
 const owner: Record<string, LocalNodes> = { '3': m3, '3-3': m33, '3-3-3': m333, '3-3-3-3': m3333 };
 
 // Central authority allocates the top node; each child is issued by its parent's Core and accepted by its own.
-await m3.accept({ id: '3', kind: 'ASSET' });
+await m3.accept({ id: '3', type: 'MACHINE' });
 for (const [parent, child, machineOfChild] of [['3', '3-3', m33], ['3-3', '3-3-3', m333], ['3-3-3', '3-3-3-3', m3333]] as const) {
   const issued = await owner[parent].issueChildId(parent);
   assert.equal(issued.value, child);
-  await machineOfChild.accept({ id: issued.value, kind: 'ASSET', parentId: parent });
+  await machineOfChild.accept({ id: issued.value, type: 'MACHINE', parentId: parent });
 }
-assert.deepEqual(await m3333.describe('3-3-3-3'), { id: '3-3-3-3', kind: 'ASSET', parentId: '3-3-3', basis: '3-3-3-3', childCount: 0, status: 'ACTIVE' });
+assert.deepEqual(await m3333.describe('3-3-3-3'), { id: '3-3-3-3', type: 'MACHINE', parentId: '3-3-3', basis: '3-3-3-3', childCount: 0, status: 'ACTIVE' });
 assert.equal((await m3.describe('3'))!.childCount, 1);
 assert.equal((await m3.issueChildId('3')).value, '3-4', 'the counter moves forward');
 assert.equal((await m3.describe('3'))!.childCount, 2);
@@ -21,16 +21,16 @@ assert.equal((await m3.describe('3'))!.childCount, 2);
 // A node can only be asked about on the machine that holds it.
 assert.equal(await m3.describe('3-3'), undefined);
 await assert.rejects(() => m3.issueChildId('3-3'), /does not exist on this Core/);
-await assert.rejects(() => m3.accept({ id: '3', kind: 'ASSET' }), /already exists/);
+await assert.rejects(() => m3.accept({ id: '3', type: 'MACHINE' }), /already exists/);
 
-// Every node names its kind when it is recorded, and nothing changes it afterwards: not a rehome, a roll-up or a retire.
-await assert.rejects(() => machine().accept({ id: '3-9' } as never), /PEOPLE or ASSET/);
-await assert.rejects(() => machine().accept({ id: '3-9', kind: 'MACHINE' } as never), /PEOPLE or ASSET/);
+// Every node names its type when it is recorded, and nothing changes it afterwards: not a rehome, a roll-up or a retire.
+await assert.rejects(() => machine().accept({ id: '3-9' } as never), /ORGANIZATION, GROUP, USER or MACHINE/);
+await assert.rejects(() => machine().accept({ id: '3-9', type: 'PRINTER' } as never), /ORGANIZATION, GROUP, USER or MACHINE/);
 const person = machine();
-await person.accept({ id: '3-9', kind: 'PEOPLE', parentId: '3' });
-assert.equal((await person.setParent('3-9', '3-3')).kind, 'PEOPLE');
+await person.accept({ id: '3-9', type: 'USER', parentId: '3' });
+assert.equal((await person.setParent('3-9', '3-3')).type, 'USER');
 await person.retire('3-9');
-assert.equal((await person.describe('3-9'))!.kind, 'PEOPLE');
+assert.equal((await person.describe('3-9'))!.type, 'USER');
 
 // Walking up the tree is a chain of questions; nothing is cached.
 const walkUp = async (id: string) => { const chain: string[] = []; for (let d = await owner[id].describe(id); d?.parentId; d = await owner[d.parentId].describe(d.parentId)) chain.push(d.parentId); return chain; };
@@ -46,7 +46,7 @@ assert.deepEqual(rolled, { previousBasis: '3-3-3-3', basis: '3-5' });
 const after = (await m3333.describe('3-3-3-3'))!;
 assert.equal(after.id, '3-3-3-3');
 assert.equal(after.parentId, '3-3-3');
-assert.equal(after.kind, 'ASSET', 'a roll-up changes only the basis');
+assert.equal(after.type, 'MACHINE', 'a roll-up changes only the basis');
 const grandchild = await m3333.issueChildId('3-3-3-3');
 assert.equal(grandchild.value, '3-5-3', 'new children come from the new basis, counter restarted');
 assert.equal((await m3333.issueChildId('3-3-3-3')).value, '3-5-4');
@@ -58,7 +58,7 @@ assert.equal((await m3333.describe('3-3-3-3'))!.basis, '3-5');
 const nIssue = await m33.issueChildId('3-3');
 assert.equal(nIssue.value, '3-3-4');
 const mN = machine(); owner[nIssue.value] = mN;
-await mN.accept({ id: nIssue.value, kind: 'ASSET', parentId: '3-3' });
+await mN.accept({ id: nIssue.value, type: 'MACHINE', parentId: '3-3' });
 await m33.adjustChildCount('3-3', -1);
 await mN.adjustChildCount(nIssue.value, 1);
 await m333.setParent('3-3-3', nIssue.value);

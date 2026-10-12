@@ -27,23 +27,23 @@ const call = async (core: Running, method: 'GET' | 'POST', path: string, body?: 
   return { status: response.status, payload };
 };
 
-await A.nodes.accept({ id: '3', kind: 'ASSET' }); // the first node, created by hand on the first machine
+await A.nodes.accept({ id: '3', type: 'MACHINE' }); // the first node, created by hand on the first machine
 
 // Create on another machine: A issues, B records, and B stores A's address beside its pointer.
-let r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', kind: 'ASSET', newNodeAddress: B.address });
+let r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'MACHINE', newNodeAddress: B.address });
 assert.equal(r.status, 201); assert.equal(r.payload.id, '3-3'); assert.equal(r.payload.address, B.address);
-assert.deepEqual(await B.nodes.describe('3-3'), { id: '3-3', kind: 'ASSET', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
+assert.deepEqual(await B.nodes.describe('3-3'), { id: '3-3', type: 'MACHINE', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
 // Create on this same machine (no address given).
-r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', kind: 'PEOPLE' });
-assert.equal(r.payload.id, '3-4'); assert.equal(r.payload.kind, 'PEOPLE');
+r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'USER' });
+assert.equal(r.payload.id, '3-4'); assert.equal(r.payload.type, 'USER');
 assert.equal((await A.nodes.describe('3-4'))!.parentAddress, A.address);
 // Under a node held by B, placed on C.
-r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3-3', parentAddress: B.address, kind: 'ASSET', newNodeAddress: C.address });
+r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3-3', parentAddress: B.address, type: 'GROUP', newNodeAddress: C.address });
 assert.equal(r.payload.id, '3-3-3');
 
 // What A holds, and walking up from a node on C.
 r = await call(A, 'GET', '/v1/core/topology/local');
-assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.kind]), [['3', 'ASSET'], ['3-4', 'PEOPLE']]);
+assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.type]), [['3', 'MACHINE'], ['3-4', 'USER']]);
 r = await call(A, 'GET', `/v1/core/topology/walk-up?nodeId=3-3-3&nodeAddress=${encodeURIComponent(C.address)}`);
 assert.deepEqual(r.payload.chain.map((n: any) => n.id), ['3-3', '3']);
 
@@ -56,7 +56,7 @@ r = await call(A, 'POST', '/v1/core/topology/rehome', { nodeId: '3-3-3', nodeAdd
 assert.equal(r.payload.changed, true);
 assert.equal((await C.nodes.describe('3-3-3'))!.parentId, '3-4');
 assert.equal((await C.nodes.describe('3-3-3'))!.parentAddress, A.address);
-assert.equal((await C.nodes.describe('3-3-3'))!.kind, 'ASSET', 'a move changes the pointer, never the kind');
+assert.equal((await C.nodes.describe('3-3-3'))!.type, 'GROUP', 'a move changes the pointer, never the type');
 assert.equal((await A.nodes.describe('3-4'))!.childCount, 1);
 assert.equal((await B.nodes.describe('3-3'))!.childCount, 0);
 r = await call(A, 'POST', '/v1/core/topology/remove', { nodeId: '3-3', nodeAddress: B.address });
@@ -66,9 +66,9 @@ assert.equal((await A.nodes.describe('3'))!.childCount, 1); // 3-4 remains; the 
 // Refusals come back as errors, not silent changes.
 r = await call(A, 'POST', '/v1/core/topology/rehome', { nodeId: '3-4', newParentId: '3-4' });
 assert.ok(r.status >= 400);
-r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', kind: 'ASSET', newNodeAddress: 'http://127.0.0.1:9' });
+r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'MACHINE', newNodeAddress: 'http://127.0.0.1:9' });
 assert.ok(r.status >= 400);
-// A create without a kind is refused before any number is issued.
+// A create without a type is refused before any number is issued.
 r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3' });
 assert.equal(r.status, 400);
 assert.equal((await A.nodes.describe('3'))!.childCount, 1); // a failed create leaves the count where it was

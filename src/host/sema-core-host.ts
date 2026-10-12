@@ -4,7 +4,7 @@ import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
-import { isNodeKind, type LocalNodes, type NodeKind } from '../topology/local-nodes.js';
+import { isNodeType, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
 import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
@@ -152,8 +152,8 @@ export class SemaCoreHost {
       packageName: '@selo/sema-core', version: this.version,
       summary: 'Local-first Core Host for settings, statistics, health, and documented access to SEMA Core runtime services.',
       endpoints: [
-        { method: 'GET', path: '/v1/core/topology/nodes', purpose: 'Describe a node held by this Core: kind, parent, basis, child count and status (query: id).' },
-        { method: 'POST', path: '/v1/core/topology/nodes/accept', purpose: 'Record a node on this machine from an ID that another Core issued. Its kind (PEOPLE or ASSET) is set here and never changes.' },
+        { method: 'GET', path: '/v1/core/topology/nodes', purpose: 'Describe a node held by this Core: type, parent, basis, child count and status (query: id).' },
+        { method: 'POST', path: '/v1/core/topology/nodes/accept', purpose: 'Record a node on this machine from an ID that another Core issued. Its type (ORGANIZATION, GROUP, USER or MACHINE) is set here and never changes.' },
         { method: 'POST', path: '/v1/core/topology/nodes/issue-child', purpose: 'Issue the ID for a new child from a node\'s basis and count the child.' },
         { method: 'POST', path: '/v1/core/topology/nodes/issue-basis', purpose: 'Issue a fresh value another node will adopt as its basis in a roll-up.' },
         { method: 'POST', path: '/v1/core/topology/nodes/set-parent', purpose: 'Change a node\'s parent pointer.' },
@@ -162,8 +162,8 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/retire', purpose: 'Retire a node and return its child count so the parent can absorb it.' },
         { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds and the address other Cores use to reach it.' },
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
-        { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given kind (PEOPLE or ASSET) under a parent, here or on another machine: installs a machine or adds a user.' },
-        { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given kind (PEOPLE or ASSET) between a node and its parent.' },
+        { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
+        { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
         { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
@@ -202,7 +202,7 @@ export class SemaCoreHost {
   // Nodes held by this Core. Operations across machines are conversations between Cores built from these.
   private requireNodes() { if (!this.localNodes) throw new CoreHostValidationError('Local nodes are not enabled on this Core'); return this.localNodes; }
   private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
-  private kind(value: unknown): NodeKind { if (!isNodeKind(value)) throw new CoreHostValidationError('kind must be PEOPLE or ASSET'); return value; }
+  private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, USER or MACHINE'); return value; }
   private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({})) {
     await this.requireAdministration(context, 'core.topology.write');
     const result = await work(this.requireNodes());
@@ -211,7 +211,7 @@ export class SemaCoreHost {
   }
   /** What any authorized caller, including another Core walking up the tree, may learn about a node held here. */
   async nodeDescribe(context: CoreHostRequestContext, input: { id: string }) { await this.requireRead(context, 'core.topology.read'); return (await this.requireNodes().describe(this.text(input.id, 'id'))) ?? null; }
-  nodeAccept(context: CoreHostRequestContext, input: { id: string; kind: NodeKind; parentId?: string; parentAddress?: string }) { const id = this.text(input.id, 'id'); const kind = this.kind(input.kind); const parentId = input.parentId === undefined ? undefined : this.text(input.parentId, 'parentId'); const parentAddress = input.parentAddress === undefined ? undefined : this.text(input.parentAddress, 'parentAddress'); return this.nodeChange(context, 'core.topology.node-accepted', [id, ...(parentId ? [parentId] : [])], (nodes) => nodes.accept({ id, kind, parentId, parentAddress }), (result) => ({ kind: result.kind })); }
+  nodeAccept(context: CoreHostRequestContext, input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }) { const id = this.text(input.id, 'id'); const type = this.nodeType(input.type); const parentId = input.parentId === undefined ? undefined : this.text(input.parentId, 'parentId'); const parentAddress = input.parentAddress === undefined ? undefined : this.text(input.parentAddress, 'parentAddress'); return this.nodeChange(context, 'core.topology.node-accepted', [id, ...(parentId ? [parentId] : [])], (nodes) => nodes.accept({ id, type, parentId, parentAddress }), (result) => ({ type: result.type })); }
   nodeIssueChild(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.child-id-issued', [nodeId], (nodes) => nodes.issueChildId(nodeId), (result) => ({ value: result.value, childCount: result.childCount })); }
   nodeIssueBasis(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.basis-issued', [nodeId], (nodes) => nodes.issueBasis(nodeId), (result) => ({ value: result.value })); }
   nodeSetParent(context: CoreHostRequestContext, input: { nodeId: string; parentId: string; parentAddress?: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const parentId = this.text(input.parentId, 'parentId'); const parentAddress = input.parentAddress === undefined ? undefined : this.text(input.parentAddress, 'parentAddress'); return this.nodeChange(context, 'core.topology.parent-set', [nodeId, parentId], (nodes) => nodes.setParent(nodeId, parentId, parentAddress)); }
@@ -244,23 +244,23 @@ export class SemaCoreHost {
   /** Walks up from a node, one parent at a time, stopping where a machine cannot be reached. */
   async topologyWalkUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) { await this.requireRead(context, 'core.topology.read'); return this.conversations().walkUp(this.text(input.nodeId, 'nodeId'), this.address(input.nodeAddress, 'nodeAddress')); }
   /** Creates a node under a parent, on this machine or on the Core at newNodeAddress. Installing a machine and adding a user are this operation. */
-  topologyCreate(context: CoreHostRequestContext, input: { parentId: string; parentAddress?: string; kind: NodeKind; newNodeAddress?: string }) {
-    const parentId = this.text(input.parentId, 'parentId'), kind = this.kind(input.kind);
+  topologyCreate(context: CoreHostRequestContext, input: { parentId: string; parentAddress?: string; type: NodeType; newNodeAddress?: string }) {
+    const parentId = this.text(input.parentId, 'parentId'), type = this.nodeType(input.type);
     return this.conversation(context, 'core.topology.node-created', [parentId], async (talk) => {
       const parentAddress = this.address(input.parentAddress, 'parentAddress');
       const newNodeAddress = this.address(input.newNodeAddress, 'newNodeAddress');
-      const created = await talk.createNode({ parentId, parentAddress, kind, newNodePeer: await this.placement(newNodeAddress) });
+      const created = await talk.createNode({ parentId, parentAddress, type, newNodePeer: await this.placement(newNodeAddress) });
       return { ...created, address: newNodeAddress ?? null };
-    }, (result) => ({ id: result.id, kind, parentId, address: result.address }));
+    }, (result) => ({ id: result.id, type, parentId, address: result.address }));
   }
   /** Inserts a new node between a node and its parent. */
-  topologyInsertAbove(context: CoreHostRequestContext, input: { childId: string; childAddress?: string; kind: NodeKind; newNodeAddress?: string }) {
-    const childId = this.text(input.childId, 'childId'), kind = this.kind(input.kind);
+  topologyInsertAbove(context: CoreHostRequestContext, input: { childId: string; childAddress?: string; type: NodeType; newNodeAddress?: string }) {
+    const childId = this.text(input.childId, 'childId'), type = this.nodeType(input.type);
     return this.conversation(context, 'core.topology.node-inserted', [childId], async (talk) => {
       const newNodeAddress = this.address(input.newNodeAddress, 'newNodeAddress');
-      const inserted = await talk.insertAbove({ childId, childAddress: this.address(input.childAddress, 'childAddress'), kind, newNodePeer: await this.placement(newNodeAddress), newNodeAddress });
+      const inserted = await talk.insertAbove({ childId, childAddress: this.address(input.childAddress, 'childAddress'), type, newNodePeer: await this.placement(newNodeAddress), newNodeAddress });
       return { ...inserted, address: newNodeAddress ?? null };
-    }, (result) => ({ id: result.id, kind, parentId: result.parentId, address: result.address }));
+    }, (result) => ({ id: result.id, type, parentId: result.parentId, address: result.address }));
   }
   /** Moves a node and everything below it under a new parent. Only a move under itself is refused. */
   topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {

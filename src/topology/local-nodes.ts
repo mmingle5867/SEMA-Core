@@ -4,23 +4,25 @@ import { encodeBase56 } from '../identity/base56.js';
  * Nodes held by THIS Core: its own machine node and the user nodes placed on this machine.
  * Every other node lives on another machine and is reached by asking its Core.
  *
- * A record holds an ID, a kind, a parent pointer (the parent's permanent ID), a basis with the counter that
+ * A record holds an ID, a type, a parent pointer (the parent's permanent ID), a basis with the counter that
  * issues values from it, a count of direct children, and a status. Nothing else is stored.
  * Operations that involve several machines are conversations between Cores built from the
  * single-node operations below.
  */
 /**
- * Which tree a node sits in, and so what its parent pointer means. PEOPLE is the organization tree
- * (organizations, departments, users); ASSET is the physical or network tree (machines, devices).
- * Set once when the node is recorded and never changed: a different kind is a new node with a new ID.
+ * What a node is. Only the types Core's own rules treat differently are listed here:
+ * ORGANIZATION is a company, with its own keyholders and its own seat limits; GROUP is a grouping inside
+ * one (department, site, network); USER is a person and MACHINE is a PC or device, and each of those two
+ * takes a seat. Finer detail (laptop, printer, sales department) is a description kept by Foundation Access.
+ * Set once when the node is recorded and never changed: a different type is a new node with a new ID.
  */
-export const NODE_KINDS = ['PEOPLE', 'ASSET'] as const;
-export type NodeKind = (typeof NODE_KINDS)[number];
-export const isNodeKind = (value: unknown): value is NodeKind => NODE_KINDS.includes(value as NodeKind);
+export const NODE_TYPES = ['ORGANIZATION', 'GROUP', 'USER', 'MACHINE'] as const;
+export type NodeType = (typeof NODE_TYPES)[number];
+export const isNodeType = (value: unknown): value is NodeType => NODE_TYPES.includes(value as NodeType);
 
 export interface LocalNode {
   id: string;
-  kind: NodeKind;
+  type: NodeType;
   parentId?: string;
   /** Where to reach the parent's Core, kept as a stable name. Set whenever the pointer is set. */
   parentAddress?: string;
@@ -59,7 +61,7 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
 }
 
 /** What any other Core may learn about a node by asking. */
-export type NodeDescription = Pick<LocalNode, 'id' | 'kind' | 'parentId' | 'parentAddress' | 'basis' | 'childCount' | 'status'>;
+export type NodeDescription = Pick<LocalNode, 'id' | 'type' | 'parentId' | 'parentAddress' | 'basis' | 'childCount' | 'status'>;
 
 const segments = (basis: string) => basis.split('-').length;
 
@@ -67,11 +69,11 @@ export class LocalNodes {
   constructor(private readonly store: LocalNodeStore) {}
 
   /** Records a node on this machine from an ID that another Core, or the central authority, issued. */
-  async accept(input: { id: string; kind: NodeKind; parentId?: string; parentAddress?: string }) {
+  async accept(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }) {
     if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
-    if (!isNodeKind(input.kind)) throw new Error('A node kind must be PEOPLE or ASSET');
+    if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
     if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
-    const node: LocalNode = { id: input.id, kind: input.kind, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
+    const node: LocalNode = { id: input.id, type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
     await this.store.insert(node);
     return this.describeNode(node);
   }
@@ -143,5 +145,5 @@ export class LocalNodes {
   }
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
-  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, kind: node.kind, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
+  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
 }

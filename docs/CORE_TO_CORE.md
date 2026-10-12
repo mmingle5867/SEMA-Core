@@ -19,8 +19,8 @@ Without the peer credential a Core still works alone; the conversation routes an
 | --- | --- |
 | `GET /v1/core/topology/local` | The nodes this Core holds and its own address. |
 | `GET /v1/core/topology/walk-up?nodeId=&nodeAddress=` | Parents in turn; stops where a machine cannot be reached. |
-| `POST /v1/core/topology/create` `{parentId, parentAddress?, kind, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
-| `POST /v1/core/topology/insert-above` `{childId, childAddress?, kind, newNodeAddress?}` | New node between a node and its parent. |
+| `POST /v1/core/topology/create` `{parentId, parentAddress?, type, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
+| `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
 | `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; children follow the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from the highest reachable ancestor. |
@@ -28,10 +28,23 @@ Without the peer credential a Core still works alone; the conversation routes an
 
 An address left out means "this Core". Each operation is audited by the Core that ran it.
 
-## Node kind
+## Node type
 
-Every node has a `kind`: `PEOPLE` (the organization tree: organizations, departments, users) or `ASSET` (the physical or network tree: machines, devices). It says what the node's parent pointer means.
+Every node has a `type`. Core lists only the types its own rules treat differently:
 
-The kind is named when the node is created and recorded once, by the Core that holds the node. A create or insert without it is refused before any number is issued. Nothing changes it afterwards: not a rehome, a roll-up or a removal. A different kind is a new node with a new ID.
+| Type | What it is | Takes a seat |
+| --- | --- | --- |
+| `ORGANIZATION` | A company, with its own keyholders and its own seat limits. | No |
+| `GROUP` | A grouping inside one: department, site, network. | No |
+| `USER` | A person. | Yes, a user seat |
+| `MACHINE` | A PC or device. | Yes, a machine seat |
 
-Nodes recorded before the kind existed were all machines' own nodes, so the migration marks them `ASSET`.
+Finer detail (laptop, printer, sales department) is a description kept by Foundation Access.
+
+The type is named when the node is created and recorded once, by the Core that holds the node. A create or insert without it is refused before any number is issued. Nothing changes it afterwards: not a rehome, a roll-up or a removal. A different type is a new node with a new ID.
+
+A machine's own node is a `MACHINE`. Seat limits are not built yet.
+
+## Testing the PostgreSQL stores
+
+`npm test` uses the in-memory stores. `npm run test:postgres` runs the node store and Core's start-up against a real database: set `SEMA_CORE_TEST_DATABASE_URL` to an empty, migrated database that is not the live one. Without it the test is skipped.

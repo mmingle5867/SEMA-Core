@@ -22,10 +22,10 @@ const count = async (id: string) => (await cores.get(id)!.describe(id))!.childCo
 const parentOf = async (id: string) => (await cores.get(id)!.describe(id))!.parentId;
 
 // The central authority allocates the top node. Children are issued by their parent's Core and accepted by their own.
-await place('3', fresh(), 'core-top.example').accept({ id: '3', kind: 'ASSET' });
+await place('3', fresh(), 'core-top.example').accept({ id: '3', type: 'MACHINE' });
 const make = async (parentId: string) => {
   const peer = fresh();
-  const created = await talk.createNode({ parentId, parentAddress: addressOf(parentId), kind: 'ASSET', newNodePeer: peer });
+  const created = await talk.createNode({ parentId, parentAddress: addressOf(parentId), type: 'MACHINE', newNodePeer: peer });
   place(created.id, peer);
   return created.id;
 };
@@ -44,7 +44,7 @@ down.delete(a);
 
 // A failed accept hands the count back.
 const refusing = { ...fresh(), accept: async () => { throw new Error('refused'); } } as unknown as NodePeer;
-await assert.rejects(() => talk.createNode({ parentId: '3', parentAddress: addressOf('3'), kind: 'ASSET', newNodePeer: refusing }), /refused/);
+await assert.rejects(() => talk.createNode({ parentId: '3', parentAddress: addressOf('3'), type: 'MACHINE', newNodePeer: refusing }), /refused/);
 assert.equal(await count('3'), 1, 'the issuing parent took the child back off its count');
 
 // Roll-up with everything reachable: the highest reachable ancestor issues, giving the shortest basis allowed.
@@ -68,12 +68,12 @@ down.delete('3');
 const aBefore = await count(a);
 const nPeer = fresh();
 const nAddress = 'core-inserted.example';
-const inserted = await talk.insertAbove({ childId: b, childAddress: addressOf(b), kind: 'PEOPLE', newNodePeer: nPeer, newNodeAddress: nAddress });
+const inserted = await talk.insertAbove({ childId: b, childAddress: addressOf(b), type: 'ORGANIZATION', newNodePeer: nPeer, newNodeAddress: nAddress });
 place(inserted.id, nPeer, nAddress);
 assert.equal(await parentOf(b), inserted.id);
 assert.equal(await parentOf(inserted.id), a);
 assert.equal(await count(inserted.id), 1);
-assert.equal((await nPeer.describe(inserted.id))!.kind, 'PEOPLE', 'the inserted node has the kind it was given');
+assert.equal((await nPeer.describe(inserted.id))!.type, 'ORGANIZATION', 'the inserted node has the type it was given');
 assert.equal(await count(a), aBefore, 'a gained N and lost b');
 
 // Rehome b under the top node. Counts follow; a cycle is refused; so is an unreachable old parent.
