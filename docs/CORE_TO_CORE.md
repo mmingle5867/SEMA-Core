@@ -19,11 +19,19 @@ Without the peer credential a Core still works alone; the conversation routes an
 | --- | --- |
 | `GET /v1/core/topology/local` | The nodes this Core holds and its own address. |
 | `GET /v1/core/topology/walk-up?nodeId=&nodeAddress=` | Parents in turn; stops where a machine cannot be reached. |
-| `POST /v1/core/topology/create` `{parentId, parentAddress?, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
-| `POST /v1/core/topology/insert-above` `{childId, childAddress?, newNodeAddress?}` | New node between a node and its parent. |
+| `POST /v1/core/topology/create` `{parentId, parentAddress?, kind, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
+| `POST /v1/core/topology/insert-above` `{childId, childAddress?, kind, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
 | `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; children follow the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from the highest reachable ancestor. |
 | `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor. |
 
 An address left out means "this Core". Each operation is audited by the Core that ran it.
+
+## Node kind
+
+Every node has a `kind`: `PEOPLE` (the organization tree: organizations, departments, users) or `ASSET` (the physical or network tree: machines, devices). It says what the node's parent pointer means.
+
+The kind is named when the node is created and recorded once, by the Core that holds the node. A create or insert without it is refused before any number is issued. Nothing changes it afterwards: not a rehome, a roll-up or a removal. A different kind is a new node with a new ID.
+
+Nodes recorded before the kind existed were all machines' own nodes, so the migration marks them `ASSET`.
