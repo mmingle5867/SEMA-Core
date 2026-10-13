@@ -28,6 +28,8 @@ try {
   await assert.rejects(() => nodes.accept({ id: '3-T3', type: 'USER' }), /already exists/);
   assert.deepEqual((await nodes.list()).map((node) => [node.id, node.type]), [['3', 'MACHINE'], ['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE']]);
 
+  assert.equal((await nodes.listWithNextId()).find((node) => node.id === '3-T1')!.nextId, '3-T1-3');
+
   // Changes keep the type: issuing, moving, rolling up and retiring.
   assert.equal((await nodes.issueChildId('3-T1')).value, '3-T1-3');
   assert.equal((await nodes.setParent('3-T3', '3-T1')).type, 'USER');

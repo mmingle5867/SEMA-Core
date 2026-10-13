@@ -160,7 +160,7 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/set-basis', purpose: 'Adopt a shorter basis after a roll-up and restart its counter.' },
         { method: 'POST', path: '/v1/core/topology/nodes/child-count', purpose: 'Move a node\'s child count by a signed amount, never below zero.' },
         { method: 'POST', path: '/v1/core/topology/nodes/retire', purpose: 'Retire a node and return its child count so the parent can absorb it.' },
-        { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds and the address other Cores use to reach it.' },
+        { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds, each with the next ID it would issue, and the address other Cores use to reach it.' },
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
         { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
@@ -240,7 +240,7 @@ export class SemaCoreHost {
     return result;
   }
   /** The nodes this Core holds, with the address others use to reach it. */
-  async topologyLocal(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return { address: this.ownAddress() ?? null, nodes: await this.requireNodes().list() }; }
+  async topologyLocal(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return { address: this.ownAddress() ?? null, nodes: await this.requireNodes().listWithNextId() }; }
   /** Walks up from a node, one parent at a time, stopping where a machine cannot be reached. */
   async topologyWalkUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) { await this.requireRead(context, 'core.topology.read'); return this.conversations().walkUp(this.text(input.nodeId, 'nodeId'), this.address(input.nodeAddress, 'nodeAddress')); }
   /** Creates a node under a parent, on this machine or on the Core at newNodeAddress. Installing a machine and adding a user are this operation. */

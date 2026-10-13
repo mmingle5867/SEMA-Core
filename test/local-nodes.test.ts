@@ -15,7 +15,9 @@ for (const [parent, child, machineOfChild] of [['3', '3-3', m33], ['3-3', '3-3-3
 }
 assert.deepEqual(await m3333.describe('3-3-3-3'), { id: '3-3-3-3', type: 'MACHINE', parentId: '3-3-3', basis: '3-3-3-3', childCount: 0, status: 'ACTIVE' });
 assert.equal((await m3.describe('3'))!.childCount, 1);
+assert.equal((await m3.listWithNextId())[0].nextId, '3-4', 'the next ID is the basis plus the next number');
 assert.equal((await m3.issueChildId('3')).value, '3-4', 'the counter moves forward');
+assert.equal((await m3.listWithNextId())[0].nextId, '3-5');
 assert.equal((await m3.describe('3'))!.childCount, 2);
 
 // A node can only be asked about on the machine that holds it.
@@ -53,6 +55,7 @@ assert.equal((await m3333.issueChildId('3-3-3-3')).value, '3-5-4');
 await assert.rejects(() => m3333.setBasis('3-3-3-3', '3-6'), /shorter/);
 await assert.rejects(() => m3333.setBasis('3-3-3-3', '3-5-3-3'), /shorter/);
 assert.equal((await m3333.describe('3-3-3-3'))!.basis, '3-5');
+assert.equal((await m3333.listWithNextId())[0].nextId, '3-5-5', 'after a roll-up the next ID comes from the new basis');
 
 // Insert N between P=3-3 and c=3-3-3: P issues N and keeps its count (gains N, loses c); c points to N.
 const nIssue = await m33.issueChildId('3-3');
@@ -83,6 +86,7 @@ await m3.adjustChildCount('3', retired.childCount - 1);
 const gone = (await m333.describe('3-3-3'))!;
 assert.equal(gone.status, 'RETIRED');
 assert.equal(gone.childCount, 0);
+assert.equal((await m333.listWithNextId())[0].nextId, undefined, 'a retired node issues nothing');
 assert.equal(gone.parentId, '3', 'a retired node keeps its own pointer');
 await assert.rejects(() => m333.issueChildId('3-3-3'), /retired/);
 await assert.rejects(() => m333.setParent('3-3-3', '3'), /retired/);
