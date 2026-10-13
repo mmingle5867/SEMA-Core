@@ -50,10 +50,20 @@ export interface CoreHostStore {
   getHostStatistics(): Promise<CoreHostStatistics>;
   getCapabilitiesForHost(): Promise<CoreCapability[]>;
   /**
-   * The next value from the counter that assigns the first ID of each new system. One counter, held by the
-   * original system; it never goes backwards and never gives a value twice. Value 1 is the original system itself.
+   * The block of first IDs this Core may assign to new systems, if it holds one. `issued` is the last value
+   * given out and `end` is the first value beyond the block.
    */
-  issueTopLevelValue(): Promise<bigint>;
+  topLevelBlock(): Promise<{ block: number; issued: bigint; end: bigint } | undefined>;
+  /**
+   * Gives this Core a block. Refused while it holds a block that still has values left, so a block is never
+   * dropped by mistake. `start` is the first value the block may give out.
+   */
+  grantTopLevelBlock(input: { block: number; start: bigint; end: bigint }): Promise<void>;
+  /**
+   * The next value from this Core's block. It never goes backwards and never gives a value twice.
+   * Undefined when this Core holds no block, or its block is used up.
+   */
+  issueTopLevelValue(): Promise<bigint | undefined>;
 }
 
 export interface CoreHostAuthorization {

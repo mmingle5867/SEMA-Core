@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { FIRST_NODE_ID, RESERVED_TOP_LEVEL_LIMIT, formatInstallCode, parseInstallCode, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, LocalCoreHostAuthorization, LocalNodes, SemaCore, SemaCoreHost, joiningPeer, resolveStart, startCoreHostHttpServer, startJoinServer, type JoinRequest, type NodeDescription } from '../src/index.js';
+import { FIRST_NODE_ID, RESERVED_TOP_LEVEL_LIMIT, TOP_LEVEL_BLOCK_COUNT, encodeBase56, formatInstallCode, parseInstallCode, topLevelBlockRange, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, LocalCoreHostAuthorization, LocalNodes, SemaCore, SemaCoreHost, joiningPeer, resolveStart, startCoreHostHttpServer, startJoinServer, type JoinRequest, type NodeDescription } from '../src/index.js';
 
 // Install codes. The first IDs 3 to zzzzz are reserved and assigned one at a time; a code carries one, with check characters.
 assert.equal(FIRST_NODE_ID, '3');
@@ -111,22 +111,63 @@ assert.equal(r.status, 400);
 assert.match(r.payload.error.message, /must be able to reach its parent/);
 assert.equal((await B.nodes.listWithNextId())[0].nextId, '3-3', 'nothing was issued');
 
-// The original system assigns the first ID of each new system, one at a time, with its own permission.
+// First IDs are assigned from blocks of a million, so losing one Core never loses the ability to assign them.
+assert.equal(TOP_LEVEL_BLOCK_COUNT, 551);
+assert.deepEqual(topLevelBlockRange(0), { start: BigInt(2), end: BigInt(1_000_000) }, 'block 0 skips the unused value and the original system');
+assert.deepEqual(topLevelBlockRange(1), { start: BigInt(1_000_000), end: BigInt(2_000_000) });
+assert.deepEqual(topLevelBlockRange(550), { start: BigInt(550_000_000), end: RESERVED_TOP_LEVEL_LIMIT }, 'the last block stops at the end of the reserve');
+for (const bad of [-1, 551, 1.5]) assert.throws(() => topLevelBlockRange(bad), /whole number from 0 to 550/);
 {
   const granted = new Set(['core.topology.write']);
-  const make = async (installationId: string) => { const store = new InMemorySemaCoreHostStore(); const host = new SemaCoreHost(new SemaCore(store, { installationId, maxReservationSize: 25 }), store, { canRead: async () => true, canAdminister: async ({ resource }) => granted.has(resource) }); await host.initialize({ actorId: 'admin' }); return { host, store }; };
+  const make = async (installationId: string) => { const store = new InMemorySemaCoreHostStore(); const host = new SemaCoreHost(new SemaCore(store, { installationId, maxReservationSize: 25 }), store, { canRead: async ({ resource }) => granted.has(resource), canAdminister: async ({ resource }) => granted.has(resource) }); await host.initialize({ actorId: 'admin' }); return { host, store }; };
+  const admin = { actorId: 'admin' };
+
+  // The original system holds block 0 without being given it, and assigns one ID per code.
   const original = await make('3');
-  await assert.rejects(() => original.host.issueInstallCode({ actorId: 'admin' }), /not authorized/, 'being allowed to change the tree is not enough');
-  granted.add('core.authority.issue-install-code');
-  const first = await original.host.issueInstallCode({ actorId: 'admin' }, { note: 'Example Company' });
-  assert.deepEqual(first, { id: '4', installCode: formatInstallCode('4') });
+  await assert.rejects(() => original.host.issueInstallCode(admin), /not authorized/, 'being allowed to change the tree is not enough');
+  await assert.rejects(() => original.host.firstIdBlockStatus(admin), /not authorized/);
+  for (const permission of ['core.authority.issue-install-code', 'core.authority.read']) granted.add(permission);
+  assert.deepEqual(await original.host.firstIdBlockStatus(admin), { block: 0, firstId: '4', lastId: encodeBase56(BigInt(999_999)), nextId: '4', remaining: 999_998 });
+  const first = await original.host.issueInstallCode(admin, { note: 'Example Company' });
+  assert.deepEqual(first, { id: '4', installCode: formatInstallCode('4'), block: 0, remaining: 999_997 });
   assert.equal(parseInstallCode(first.installCode), '4');
-  assert.equal((await original.host.issueInstallCode({ actorId: 'admin' })).id, '5', 'each code assigns the next ID, never the same one twice');
-  assert.equal((await original.host.issueInstallCode({ actorId: 'admin' })).id, '6');
+  assert.equal((await original.host.issueInstallCode(admin)).id, '5', 'each code assigns the next ID, never the same one twice');
+  assert.equal((await original.host.issueInstallCode(admin)).id, '6');
   const audits = JSON.stringify(original.store.audits);
   assert.ok(audits.includes('core.authority.install-code-issued') && audits.includes('Example Company'), 'each assignment is audited with its note');
-  const other = await make('4');
-  await assert.rejects(() => other.host.issueInstallCode({ actorId: 'admin' }), /Only the original system/, 'another system cannot assign first IDs');
+
+  // Another Core cannot assign first IDs until it is given a block of its own.
+  const standby = await make('3-7');
+  assert.equal(await standby.host.firstIdBlockStatus(admin), null);
+  await assert.rejects(() => standby.host.issueInstallCode(admin), /holds no block/);
+  await assert.rejects(() => standby.host.grantFirstIdBlock(admin, { block: 1 }), /not authorized/, 'granting a block has its own permission');
+  granted.add('core.authority.grant-block');
+  await assert.rejects(() => standby.host.grantFirstIdBlock(admin, { block: 0 }), /belongs to the original system/);
+  for (const bad of [-1, 551, 1.5, '1']) await assert.rejects(() => standby.host.grantFirstIdBlock(admin, { block: bad as number }), /whole number from 0 to 550/);
+  const million = encodeBase56(BigInt(1_000_000));
+  assert.deepEqual(await standby.host.grantFirstIdBlock(admin, { block: 1, note: 'Standby at the second site' }), { block: 1, firstId: million, lastId: encodeBase56(BigInt(1_999_999)), nextId: million, remaining: 1_000_000 });
+  assert.ok(JSON.stringify(standby.store.audits).includes('core.authority.block-granted'));
+
+  // The failsafe: with the original gone, the standby carries on from its own block. Nothing overlaps.
+  const fromStandby = await standby.host.issueInstallCode(admin);
+  assert.deepEqual(fromStandby, { id: million, installCode: formatInstallCode(million), block: 1, remaining: 999_999 });
+  assert.equal(parseInstallCode(fromStandby.installCode), million);
+  assert.equal(million.length, 4, 'an ID from block 1 is still short');
+  assert.equal((await original.host.issueInstallCode(admin)).id, '7', 'and the original, if it is still there, is unaffected');
+
+  // A block is never dropped while it has values left, and is never handed out past its end.
+  await assert.rejects(() => standby.host.grantFirstIdBlock(admin, { block: 2 }), /already holds block 1/);
+  await assert.rejects(() => original.host.grantFirstIdBlock(admin, { block: 3 }), /already holds block 0/);
+  const small = await make('3-8');
+  await small.store.grantTopLevelBlock({ block: 9, start: BigInt(9_000_000), end: BigInt(9_000_002) }); // a two-value block, to reach its end
+  assert.equal((await small.host.issueInstallCode(admin)).remaining, 1);
+  assert.deepEqual(await small.host.firstIdBlockStatus(admin), { block: 9, firstId: encodeBase56(BigInt(9_000_000)), lastId: encodeBase56(BigInt(9_000_001)), nextId: encodeBase56(BigInt(9_000_001)), remaining: 1 });
+  assert.equal((await small.host.issueInstallCode(admin)).remaining, 0);
+  await assert.rejects(() => small.host.issueInstallCode(admin), /Block 9 is used up/);
+  assert.equal((await small.host.firstIdBlockStatus(admin))!.nextId, null);
+  await assert.rejects(() => small.host.grantFirstIdBlock(admin, { block: 9 }), /Grant a different block/);
+  assert.equal((await small.host.grantFirstIdBlock(admin, { block: 10 })).block, 10, 'a used-up block can be replaced');
+  assert.equal((await small.host.issueInstallCode(admin)).id, encodeBase56(BigInt(10_000_000)));
 }
 
 for (const server of [A.server, B.server, waiting.server]) server.close();

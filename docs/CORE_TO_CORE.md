@@ -77,16 +77,35 @@ Not built yet: handing the keyholder list to the new Core in the same step, and 
 
 A new system is a separate tree with its own top node. Two systems can be merged later, by adding a parent above one and rehoming the other under it, but only if none of their IDs overlap. So no two systems may start from the same first ID.
 
-The first IDs from `3` up to `zzzzz` (550,731,775 of them) are reserved and assigned, never chosen or typed. `3` is the original system. The original system's Core holds one counter that gives out the rest, `4`, `5`, `6` and so on, one install code per new system. A company gets one code, for its first machine; after that it adds its own machines by joining them, with no further code.
+The first IDs from `3` up to `zzzzz` (550,731,775 of them) are reserved and assigned, never chosen or typed. `3` is the original system. The rest are given out one at a time, `4`, `5`, `6` and so on, one install code per new system, from the block of first IDs held by the Core that issues the code (see "Blocks" below). A company gets one code, for its first machine; after that it adds its own machines by joining them, with no further code.
 
 | Step | Where | What |
 | --- | --- | --- |
-| 1 | The original system | `POST /v1/core/authority/install-codes` `{note?}` returns `{id, installCode}`. Needs `core.authority.issue-install-code`, which nobody holds by default, and only node `3` can do it. The note says who the code is for and is kept in the audit trail. |
+| 1 | The original system | `POST /v1/core/authority/install-codes` `{note?}` returns `{id, installCode}`. Needs `core.authority.issue-install-code`, which nobody holds by default, and the Core must hold a block. The note says who the code is for and is kept in the audit trail. |
 | 2 | The new system's first machine | Put the code in `SEMA_CORE_INSTALL_CODE` in Core's `.env` and start Core. It records the assigned ID as its identity. |
 
 An install code looks like `S1.4.<check characters>`. The check characters catch a mistyped code. They do not stop someone inventing a code for a reserved ID: that needs a keyholder signature, which a later version of the code carries in the same place.
 
 A first ID of six or more characters is outside the reserve. Starting a system that way is allowed by the design but is not built.
+
+### Blocks: the failsafe for losing the original system
+
+The reserve is split into 551 blocks of a million first IDs, numbered 0 to 550. A Core that assigns first IDs holds one block and gives out only its own values.
+
+- The original system, node `3`, holds block 0 without being given it.
+- Any other Core holds a block only after one is granted to it. A standby, ideally at another site, is given block 1.
+- If the original system is lost, the standby carries on from its own block. The unused part of the lost block is never used. Gaps are harmless.
+- Nothing is copied or kept in step between the two, so they can never assign the same ID, even when they cannot reach each other.
+- If there was no standby, a new block is granted to another Core. It starts above the whole of the lost block, so it is safe without knowing how far the lost Core got.
+
+| Route | What it does |
+| --- | --- |
+| `GET /v1/core/authority/block` | The block this Core holds: its number, first and last ID, the next ID and how many are left. `null` when it holds none. Needs `core.authority.read`. |
+| `POST /v1/core/authority/block` `{block, note?}` | Gives this Core a block. Needs `core.authority.grant-block`, which nobody holds by default. |
+
+A grant is refused while the Core still has values left in a block it holds, and block 0 can only belong to node `3`. A block that is used up can be replaced by a different one.
+
+**A block must never be given to two Cores.** Core cannot check that by itself, because the Cores do not know about each other's blocks. Until the keyholders' signed list records the grants, the list of granted blocks is kept by hand in the design decisions document.
 
 ## Adding a parent above a top node
 

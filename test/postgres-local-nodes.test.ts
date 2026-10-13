@@ -33,8 +33,17 @@ try {
   await prisma.$executeRaw`DELETE FROM "sema_local_nodes"`;
   await prisma.$executeRaw`DELETE FROM "sema_core_identity_state"`;
 
-  // The counter that assigns the first ID of each new system: value 1 is the original system, so it starts at 2.
+  // The block of first IDs a Core may assign: none until one is granted, then it counts up to the end and stops.
+  assert.equal(await host.topLevelBlock(), undefined);
+  assert.equal(await host.issueTopLevelValue(), undefined, 'a Core with no block assigns nothing');
+  await host.grantTopLevelBlock({ block: 0, start: BigInt(2), end: BigInt(5) });
+  assert.deepEqual(await host.topLevelBlock(), { block: 0, issued: BigInt(1), end: BigInt(5) });
+  await assert.rejects(() => host.grantTopLevelBlock({ block: 1, start: BigInt(1_000_000), end: BigInt(2_000_000) }), /values left/);
   assert.deepEqual([await host.issueTopLevelValue(), await host.issueTopLevelValue(), await host.issueTopLevelValue()], [BigInt(2), BigInt(3), BigInt(4)]);
+  assert.equal(await host.issueTopLevelValue(), undefined, 'it stops at the end of its block');
+  assert.deepEqual(await host.topLevelBlock(), { block: 0, issued: BigInt(4), end: BigInt(5) });
+  await host.grantTopLevelBlock({ block: 1, start: BigInt(1_000_000), end: BigInt(2_000_000) });
+  assert.equal(await host.issueTopLevelValue(), BigInt(1_000_000), 'a used-up block can be replaced by another');
 
   // Core's own start-up: the machine node is created on the first start and left alone on the next.
   await host.initializeIdentity('3');
