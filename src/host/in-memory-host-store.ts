@@ -8,9 +8,18 @@ const emptyLifecycleCounts = (): Record<CoreLifecycleStatus, number> => ({ PENDI
 /** Reference host store for local development and host tests. */
 export class InMemorySemaCoreHostStore extends InMemorySemaCoreStore implements CoreHostStore {
   private hostSettings: VersionedCoreHostSettings | null = null;
-  private topLevelIssued = BigInt(1);
+  private firstIdBlock: { block: number; issued: bigint; end: bigint } | undefined;
 
-  async issueTopLevelValue() { this.topLevelIssued += BigInt(1); return this.topLevelIssued; }
+  async topLevelBlock() { return this.firstIdBlock ? { ...this.firstIdBlock } : undefined; }
+  async grantTopLevelBlock(input: { block: number; start: bigint; end: bigint }) {
+    if (this.firstIdBlock && this.firstIdBlock.issued + BigInt(1) < this.firstIdBlock.end) throw new Error('This Core already holds a block with values left');
+    this.firstIdBlock = { block: input.block, issued: input.start - BigInt(1), end: input.end };
+  }
+  async issueTopLevelValue() {
+    if (!this.firstIdBlock || this.firstIdBlock.issued + BigInt(1) >= this.firstIdBlock.end) return undefined;
+    this.firstIdBlock.issued += BigInt(1);
+    return this.firstIdBlock.issued;
+  }
 
   async getHostSettings() { return this.hostSettings ? structuredClone(this.hostSettings) : null; }
   async saveHostSettings(settings: VersionedCoreHostSettings) { this.hostSettings = structuredClone(settings); return structuredClone(settings); }

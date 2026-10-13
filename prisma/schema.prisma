@@ -148,10 +148,13 @@ model SemaCoreHostSettings {
   @@map("sema_core_host_settings")
 }
 
-/// Assigns the first ID of each new system. One row, held by the original system; value 1 is that system itself.
+/// The block of first IDs this Core may assign to new systems. One row. `issued` is the last value given out;
+/// `blockEnd` is the first value beyond the block.
 model SemaTopLevelCounter {
   counterKey String   @id
+  block      Int
   issued     BigInt
+  blockEnd   BigInt
   updatedAt  DateTime @updatedAt
 
   @@map("sema_top_level_counter")

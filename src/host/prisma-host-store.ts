@@ -48,13 +48,24 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     if (!row || row.status !== 'ACTIVE') throw new Error('SEMA Core machine node is unavailable');
     return { basis: row.basis, issued: BigInt(row.issued) };
   }
+  async topLevelBlock() {
+    const rows = await this.prisma.$queryRaw<Array<{ block: number; issued: bigint; blockEnd: bigint }>>`SELECT "block", "issued", "blockEnd" FROM "sema_top_level_counter" WHERE "counterKey" = ${STATE_KEY}`;
+    return rows[0] ? { block: Number(rows[0].block), issued: BigInt(rows[0].issued), end: BigInt(rows[0].blockEnd) } : undefined;
+  }
+  async grantTopLevelBlock(input: { block: number; start: bigint; end: bigint }) {
+    // One row. A new block replaces the old one only when the old one has no values left.
+    const written = await this.prisma.$executeRaw`
+      INSERT INTO "sema_top_level_counter" ("counterKey", "block", "issued", "blockEnd", "updatedAt") VALUES (${STATE_KEY}, ${input.block}, ${input.start - BigInt(1)}, ${input.end}, NOW())
+      ON CONFLICT ("counterKey") DO UPDATE SET "block" = EXCLUDED."block", "issued" = EXCLUDED."issued", "blockEnd" = EXCLUDED."blockEnd", "updatedAt" = NOW()
+      WHERE "sema_top_level_counter"."issued" + 1 >= "sema_top_level_counter"."blockEnd"`;
+    if (written !== 1) throw new Error('This Core already holds a block with values left');
+  }
   async issueTopLevelValue() {
-    // Value 1 is the original system, so the first row starts at 2. The row is locked while it moves.
+    // The row is locked while it moves, and it stops at the end of the block.
     const rows = await this.prisma.$queryRaw<Array<{ issued: bigint }>>`
-      INSERT INTO "sema_top_level_counter" ("counterKey", "issued", "updatedAt") VALUES (${STATE_KEY}, 2, NOW())
-      ON CONFLICT ("counterKey") DO UPDATE SET "issued" = "sema_top_level_counter"."issued" + 1, "updatedAt" = NOW()
-      RETURNING "issued"`;
-    return BigInt(rows[0].issued);
+      UPDATE "sema_top_level_counter" SET "issued" = "issued" + 1, "updatedAt" = NOW()
+      WHERE "counterKey" = ${STATE_KEY} AND "issued" + 1 < "blockEnd" RETURNING "issued"`;
+    return rows[0] ? BigInt(rows[0].issued) : undefined;
   }
   /** The node this Core is, once it has an identity. Undefined on a Core that has not joined a system yet. */
   async storedInstallationId() {
