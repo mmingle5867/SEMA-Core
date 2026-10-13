@@ -22,6 +22,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/create` `{parentId, parentAddress?, type, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
 | `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/add-parent-above` `{nodeId, nodeAddress?, type, newNodeAddress?, issuerId?, issuerAddress?}` | New parent above a node that has none, so the tree grows from the ground up. Needs `core.authority.add-top`, not `core.topology.write`. See below. |
+| `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, childCount, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
 | `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; children follow the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from the highest reachable ancestor. |
@@ -53,6 +54,23 @@ A top node has no parent to issue the new node's ID, so another node issues it: 
 The issuer is the node named in `issuerId`. When none is named, it is the node with the shortest basis among the top node itself and the active nodes held by the Core that runs the request. A shorter basis keeps the new ID short; any counter gives a unique value, so the choice never affects uniqueness. On the first machine that is node `3`, so every top is `3` plus one number.
 
 This is a change at the top of the tree. It has its own permission, `core.authority.add-top`, which a grant of `core.topology.*` does not cover. Nobody holds it by default: it is granted by hand for the one occasion and removed afterwards, until keyholder signatures replace it.
+
+## Replacing a lost node
+
+A node whose records are gone (a machine rebuilt, a database lost) is replaced in two steps.
+
+1. Create the replacement like any other node. It gets a new ID, and that ID is its new basis.
+2. Record the loss with `replace-lost`, naming the lost ID, its type, the replacement, the lost node's old parent if it had one, and a child count.
+
+`replace-lost` adds the child count to the replacement, records the lost ID as retired on the replacement's Core with its pointer naming the replacement, and takes the lost node off its old parent's count. The old ID is never issued again and the old basis is closed: a retired node issues nothing.
+
+Nobody holds a list of the lost node's children, so none are contacted. Each child finds its parent retired when it next connects and follows the pointer to the replacement (`repair-parent`). The retired record must therefore be at the address the children already hold, which is why the replacement should live on the Core at the lost node's address.
+
+The child count is entered by a person, because the lost node's own record is gone. It must be at least as high as the real number: a database backup gives the number as of the backup date, plus anything added since. Too high only means the replacement never looks childless. If the old parent cannot be reached, its count stays one too high.
+
+It refuses a lost ID the replacement's Core still holds (that node is not lost: use `remove`), and a replacement that is retired, unreachable or the same node.
+
+Pointing a lost node's children at another node is a powerful act. It has its own permission, `core.authority.replace-lost`, which a grant of `core.topology.*` does not cover and nobody holds by default. When the replacement is on another Core, that Core must grant it to the calling Core as well.
 
 ## Testing the PostgreSQL stores
 

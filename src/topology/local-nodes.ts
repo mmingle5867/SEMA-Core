@@ -78,6 +78,21 @@ export class LocalNodes {
     return this.describeNode(node);
   }
 
+  /**
+   * Records a lost node's old ID on this machine as retired, with its pointer naming the node that replaced it.
+   * The old ID is not reissued: this is only the record a child follows to find the replacement. A retired
+   * node issues nothing, so the old basis stays closed. Refused when the ID is already recorded here,
+   * because a node this Core still holds is not lost.
+   */
+  async acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) {
+    if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
+    if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+    if (!input.replacementId || input.replacementId === input.id) throw new Error('A lost node needs a different node as its replacement');
+    const node: LocalNode = { id: input.id, type: input.type, parentId: input.replacementId, ...(input.replacementAddress ? { parentAddress: input.replacementAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'RETIRED' };
+    await this.store.insert(node);
+    return this.describeNode(node);
+  }
+
   async list() { return (await this.store.list()).map((node) => this.describeNode(node)); }
 
   /**

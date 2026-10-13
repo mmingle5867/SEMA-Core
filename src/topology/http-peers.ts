@@ -30,6 +30,7 @@ export class HttpNodePeer implements NodePeer {
   setBasis(id: string, basis: string) { return this.call<{ previousBasis: string; basis: string }>('POST', '/set-basis', { nodeId: id, basis }); }
   adjustChildCount(id: string, delta: number) { return this.call<{ childCount: number }>('POST', '/child-count', { nodeId: id, delta }); }
   retire(id: string) { return this.call<{ parentId?: string; childCount: number }>('POST', '/retire', { nodeId: id }); }
+  acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { return this.call<NodeDescription>('POST', '/accept-retired', input); }
 }
 
 /**

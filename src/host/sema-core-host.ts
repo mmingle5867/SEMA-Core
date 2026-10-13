@@ -165,6 +165,8 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
         { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
         { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
+        { method: 'POST', path: '/v1/core/topology/replace-lost', purpose: 'Record that a node was lost and name the node that replaced it; its children follow the retired record to the replacement. Needs the permission core.authority.replace-lost.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/accept-retired', purpose: 'Record the old ID of a lost node as retired, pointing at its replacement. Used between Cores during replace-lost; needs core.authority.replace-lost.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
         { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
@@ -204,8 +206,8 @@ export class SemaCoreHost {
   private requireNodes() { if (!this.localNodes) throw new CoreHostValidationError('Local nodes are not enabled on this Core'); return this.localNodes; }
   private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
   private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, USER or MACHINE'); return value; }
-  private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({})) {
-    await this.requireAdministration(context, 'core.topology.write');
+  private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
+    await this.requireAdministration(context, permission);
     const result = await work(this.requireNodes());
     await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
     return result;
@@ -218,6 +220,8 @@ export class SemaCoreHost {
   nodeSetParent(context: CoreHostRequestContext, input: { nodeId: string; parentId: string; parentAddress?: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const parentId = this.text(input.parentId, 'parentId'); const parentAddress = input.parentAddress === undefined ? undefined : this.text(input.parentAddress, 'parentAddress'); return this.nodeChange(context, 'core.topology.parent-set', [nodeId, parentId], (nodes) => nodes.setParent(nodeId, parentId, parentAddress)); }
   nodeSetBasis(context: CoreHostRequestContext, input: { nodeId: string; basis: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); const basis = this.text(input.basis, 'basis'); return this.nodeChange(context, 'core.topology.basis-set', [nodeId], (nodes) => nodes.setBasis(nodeId, basis), (result) => ({ previousBasis: result.previousBasis, basis: result.basis })); }
   nodeAdjustChildCount(context: CoreHostRequestContext, input: { nodeId: string; delta: number }) { const nodeId = this.text(input.nodeId, 'nodeId'); if (typeof input.delta !== 'number') throw new CoreHostValidationError('delta must be a number'); return this.nodeChange(context, 'core.topology.child-count-adjusted', [nodeId], (nodes) => nodes.adjustChildCount(nodeId, input.delta), (result) => ({ delta: input.delta, childCount: result.childCount })); }
+  /** Records a lost node's old ID as retired, pointing at its replacement. Another Core asks this during replace-lost; it needs the same permission. */
+  nodeAcceptRetired(context: CoreHostRequestContext, input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { const id = this.text(input.id, 'id'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId'); const replacementAddress = input.replacementAddress === undefined ? undefined : this.text(input.replacementAddress, 'replacementAddress'); return this.nodeChange(context, 'core.topology.lost-node-recorded', [id, replacementId], (nodes) => nodes.acceptRetired({ id, type, replacementId, replacementAddress }), () => ({ type, replacementId }), 'core.authority.replace-lost'); }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount })); }
 
   // Operations across machines. This Core runs the conversation; the other Cores are reached at their stored addresses.
@@ -278,6 +282,17 @@ export class SemaCoreHost {
       const added = await talk.addParentAbove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), type, newNodePeer: await this.placement(newNodeAddress), newNodeAddress, issuerId, issuerAddress: issuerId ? this.address(input.issuerAddress, 'issuerAddress') : undefined, alsoConsider });
       return { ...added, type, address: newNodeAddress ?? null };
     }, (result) => ({ id: result.id, type, childId: result.childId, issuerId: result.issuerId, address: result.address }), 'core.authority.add-top');
+  }
+  /**
+   * Records that a node was lost and names the node that replaced it. The replacement is created first, like any
+   * other node. Pointing a lost node's children at another node is a powerful act, so this has its own permission,
+   * `core.authority.replace-lost`, which no grant of `core.topology.*` covers and nobody holds by default.
+   */
+  topologyReplaceLost(context: CoreHostRequestContext, input: { lostId: string; type: NodeType; replacementId: string; replacementAddress?: string; childCount: number; lostParentId?: string; lostParentAddress?: string }) {
+    const lostId = this.text(input.lostId, 'lostId'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId');
+    if (typeof input.childCount !== 'number' || !Number.isSafeInteger(input.childCount) || input.childCount < 0) throw new CoreHostValidationError('childCount must be a whole number, zero or more. Enter a number at least as high as the real one');
+    const lostParentId = input.lostParentId ? this.text(input.lostParentId, 'lostParentId') : undefined;
+    return this.conversation(context, 'core.topology.lost-node-replaced', [lostId, replacementId, ...(lostParentId ? [lostParentId] : [])], (talk) => talk.replaceLost({ lostId, type, replacementId, replacementAddress: this.address(input.replacementAddress, 'replacementAddress'), childCount: input.childCount, lostParentId, lostParentAddress: lostParentId ? this.address(input.lostParentAddress, 'lostParentAddress') : undefined }), (result) => ({ type, replacementId, childCount: result.childCount, lostParentId: lostParentId ?? null, oldParentCountStale: result.oldParentCountStale }), 'core.authority.replace-lost');
   }
   /** Moves a node and everything below it under a new parent. Only a move under itself is refused. */
   topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {
