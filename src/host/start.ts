@@ -19,9 +19,9 @@ const store = new PrismaSemaCoreHostStore(prisma);
 const localNodes = new LocalNodes(new PrismaLocalNodeStore(prisma));
 
 // Which node this Core is. Its database says so once it has an identity; an ID typed into the settings never
-// creates one. A Core with no identity waits to be joined to a system by a node that is already in one,
-// unless SEMA_CORE_START_NEW_SYSTEM=yes says on purpose that it is the first node of a new system.
-let start = resolveStart({ storedId: await store.storedInstallationId(), configuredId: process.env.SEMA_CORE_INSTALLATION_ID, startNewSystem: process.env.SEMA_CORE_START_NEW_SYSTEM === 'yes' });
+// creates one. A Core with no identity is the first machine of a new system when SEMA_CORE_INSTALL_CODE carries
+// the ID assigned to that system; otherwise it waits to be joined to a system by a node that is already in one.
+let start = resolveStart({ storedId: await store.storedInstallationId(), configuredId: process.env.SEMA_CORE_INSTALLATION_ID, installCode: process.env.SEMA_CORE_INSTALL_CODE });
 if (start.mode === 'join') {
   const joinCode = process.env.SEMA_CORE_JOIN_CODE;
   const waiting = await startJoinServer({ hostname, port, joinCode, version: SEMA_CORE_VERSION, record: (request) => store.joinSystem(request) });

@@ -48,6 +48,14 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     if (!row || row.status !== 'ACTIVE') throw new Error('SEMA Core machine node is unavailable');
     return { basis: row.basis, issued: BigInt(row.issued) };
   }
+  async issueTopLevelValue() {
+    // Value 1 is the original system, so the first row starts at 2. The row is locked while it moves.
+    const rows = await this.prisma.$queryRaw<Array<{ issued: bigint }>>`
+      INSERT INTO "sema_top_level_counter" ("counterKey", "issued", "updatedAt") VALUES (${STATE_KEY}, 2, NOW())
+      ON CONFLICT ("counterKey") DO UPDATE SET "issued" = "sema_top_level_counter"."issued" + 1, "updatedAt" = NOW()
+      RETURNING "issued"`;
+    return BigInt(rows[0].issued);
+  }
   /** The node this Core is, once it has an identity. Undefined on a Core that has not joined a system yet. */
   async storedInstallationId() {
     const state = await this.prisma.semaCoreIdentityState.findUnique({ where: { stateKey: STATE_KEY } });

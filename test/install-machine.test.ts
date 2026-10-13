@@ -1,19 +1,31 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { FIRST_NODE_ID, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, LocalCoreHostAuthorization, LocalNodes, SemaCore, SemaCoreHost, joiningPeer, resolveStart, startCoreHostHttpServer, startJoinServer, type JoinRequest, type NodeDescription } from '../src/index.js';
+import { FIRST_NODE_ID, RESERVED_TOP_LEVEL_LIMIT, formatInstallCode, parseInstallCode, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, LocalCoreHostAuthorization, LocalNodes, SemaCore, SemaCoreHost, joiningPeer, resolveStart, startCoreHostHttpServer, startJoinServer, type JoinRequest, type NodeDescription } from '../src/index.js';
+
+// Install codes. The first IDs 3 to zzzzz are reserved and assigned one at a time; a code carries one, with check characters.
+assert.equal(FIRST_NODE_ID, '3');
+assert.equal(RESERVED_TOP_LEVEL_LIMIT, BigInt(550731776));
+const codeFor4 = formatInstallCode('4');
+assert.match(codeFor4, /^S1\.4\.[0-9A-Za-z]+$/);
+assert.equal(parseInstallCode(codeFor4), '4');
+assert.equal(parseInstallCode('  ' + codeFor4 + '  '), '4', 'spaces around a pasted code are ignored');
+assert.equal(parseInstallCode(formatInstallCode('zzzzz')), 'zzzzz', 'the last reserved ID');
+assert.throws(() => parseInstallCode(codeFor4.slice(0, -1) + (codeFor4.endsWith('2') ? '3' : '2')), /typing mistake/);
+assert.throws(() => parseInstallCode(codeFor4.replace('.4.', '.5.')), /typing mistake/, 'the check characters belong to one ID');
+for (const bad of ['', '4', 'S1.4', 'S2.4.abc', 'S1.3-3.abc', 'S1.24.abc', 'S1.1.abc', 'S1.2.abc', formatInstallCode('322222')]) assert.throws(() => parseInstallCode(bad), /not a SEMA install code/, `refused: ${bad}`);
 
 // How a Core starts. Its database decides which node it is; an ID typed into its settings never does.
-assert.equal(FIRST_NODE_ID, '3');
 assert.deepEqual(resolveStart({ storedId: '3' }), { mode: 'run', installationId: '3' });
 assert.deepEqual(resolveStart({ storedId: '3', configuredId: '3' }), { mode: 'run', installationId: '3' }, 'the setting may stay as a cross-check');
-assert.deepEqual(resolveStart({ storedId: '3-7', startNewSystem: true }), { mode: 'run', installationId: '3-7' }, 'a Core with an identity keeps it');
+assert.deepEqual(resolveStart({ storedId: '3-7', installCode: codeFor4 }), { mode: 'run', installationId: '3-7' }, 'a Core with an identity keeps it, whatever code it is given');
 assert.throws(() => resolveStart({ storedId: '3-7', configuredId: '3' }), /cannot be changed by its settings/);
 assert.deepEqual(resolveStart({}), { mode: 'join' }, 'a Core with no identity waits to be joined');
 assert.deepEqual(resolveStart({ configuredId: '3' }), { mode: 'join' }, 'a typed ID alone does not create an identity');
 assert.deepEqual(resolveStart({ configuredId: '9-9' }), { mode: 'join' });
-assert.deepEqual(resolveStart({ startNewSystem: true }), { mode: 'run', installationId: '3' }, 'the first node of a new system is always 3');
-assert.deepEqual(resolveStart({ startNewSystem: true, configuredId: '3' }), { mode: 'run', installationId: '3' });
-assert.throws(() => resolveStart({ startNewSystem: true, configuredId: '4' }), /always 3/);
+assert.deepEqual(resolveStart({ installCode: codeFor4 }), { mode: 'run', installationId: '4' }, 'an install code makes it the first machine of the system it was assigned');
+assert.deepEqual(resolveStart({ installCode: codeFor4, configuredId: '4' }), { mode: 'run', installationId: '4' });
+assert.throws(() => resolveStart({ installCode: codeFor4, configuredId: '3' }), /install code assigns 4/);
+assert.throws(() => resolveStart({ installCode: 'S1.4.wrong' }), /typing mistake/, 'a bad code stops the start; it does not fall back to waiting');
 
 // A Core that has not joined answers its health and the join request, and nothing else.
 const recorded: JoinRequest[] = [];
@@ -98,6 +110,24 @@ r = await B.post('/v1/core/topology/install-machine', { parentId: '3', newCoreAd
 assert.equal(r.status, 400);
 assert.match(r.payload.error.message, /must be able to reach its parent/);
 assert.equal((await B.nodes.listWithNextId())[0].nextId, '3-3', 'nothing was issued');
+
+// The original system assigns the first ID of each new system, one at a time, with its own permission.
+{
+  const granted = new Set(['core.topology.write']);
+  const make = async (installationId: string) => { const store = new InMemorySemaCoreHostStore(); const host = new SemaCoreHost(new SemaCore(store, { installationId, maxReservationSize: 25 }), store, { canRead: async () => true, canAdminister: async ({ resource }) => granted.has(resource) }); await host.initialize({ actorId: 'admin' }); return { host, store }; };
+  const original = await make('3');
+  await assert.rejects(() => original.host.issueInstallCode({ actorId: 'admin' }), /not authorized/, 'being allowed to change the tree is not enough');
+  granted.add('core.authority.issue-install-code');
+  const first = await original.host.issueInstallCode({ actorId: 'admin' }, { note: 'Example Company' });
+  assert.deepEqual(first, { id: '4', installCode: formatInstallCode('4') });
+  assert.equal(parseInstallCode(first.installCode), '4');
+  assert.equal((await original.host.issueInstallCode({ actorId: 'admin' })).id, '5', 'each code assigns the next ID, never the same one twice');
+  assert.equal((await original.host.issueInstallCode({ actorId: 'admin' })).id, '6');
+  const audits = JSON.stringify(original.store.audits);
+  assert.ok(audits.includes('core.authority.install-code-issued') && audits.includes('Example Company'), 'each assignment is audited with its note');
+  const other = await make('4');
+  await assert.rejects(() => other.host.issueInstallCode({ actorId: 'admin' }), /Only the original system/, 'another system cannot assign first IDs');
+}
 
 for (const server of [A.server, B.server, waiting.server]) server.close();
 console.log('Install machine test passed.');

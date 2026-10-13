@@ -148,6 +148,15 @@ model SemaCoreHostSettings {
   @@map("sema_core_host_settings")
 }
 
+/// Assigns the first ID of each new system. One row, held by the original system; value 1 is that system itself.
+model SemaTopLevelCounter {
+  counterKey String   @id
+  issued     BigInt
+  updatedAt  DateTime @updatedAt
+
+  @@map("sema_top_level_counter")
+}
+
 model SemaLocalNode {
   id         String   @id
   type       String
