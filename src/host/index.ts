@@ -7,3 +7,4 @@ export * from './prisma-host-store.js';
 export * from './sema-core-host.js';
 export * from './http-server.js';
 export * from './join.js';
+export * from './install-code.js';

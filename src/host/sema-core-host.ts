@@ -6,6 +6,9 @@ import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestConte
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import { isNodeType, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
 import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
+import { encodeBase56 } from '../identity/base56.js';
+import { RESERVED_TOP_LEVEL_LIMIT, formatInstallCode } from './install-code.js';
+import { FIRST_NODE_ID } from './join.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
 export interface CoreTopologyOptions {
@@ -168,6 +171,7 @@ export class SemaCoreHost {
         { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds, each with the next ID it would issue, and the address other Cores use to reach it.' },
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
+        { method: 'POST', path: '/v1/core/authority/install-codes', purpose: 'Assign the first ID of a new system and return the install code that carries it. Only the original system can; needs core.authority.issue-install-code.' },
         { method: 'POST', path: '/v1/core/topology/install-machine', purpose: 'Install a new machine: issue a node ID from a parent and give it to a Core that has no identity yet, using that machine\'s join code.' },
         { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
         { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
@@ -206,6 +210,23 @@ export class SemaCoreHost {
       ],
       statisticGroups: ['identity reservations and issuance', 'commands', 'executions', 'results', 'events', 'audit', 'capabilities'],
     };
+  }
+
+  /**
+   * Assigns the first ID of a new system and returns the install code that carries it. The IDs `3` to `zzzzz`
+   * are reserved and given out one at a time from a single counter, so only the original system, node `3`,
+   * can do this. It has its own permission, `core.authority.issue-install-code`, which nobody holds by default.
+   * The code is used once, on the first machine of the new system.
+   */
+  async issueInstallCode(context: CoreHostRequestContext, input: { note?: string } = {}) {
+    await this.requireAdministration(context, 'core.authority.issue-install-code');
+    const note = input.note === undefined || input.note === null || input.note === '' ? undefined : this.text(input.note, 'note');
+    if ((await this.store.getHostStatistics()).installationId !== FIRST_NODE_ID) throw new CoreHostValidationError(`Only the original system, node ${FIRST_NODE_ID}, assigns the first ID of a new system`);
+    const value = await this.store.issueTopLevelValue();
+    if (value >= RESERVED_TOP_LEVEL_LIMIT) throw new CoreHostValidationError('Every reserved first ID has been assigned');
+    const id = encodeBase56(value);
+    await this.core.recordAudit({ action: 'core.authority.install-code-issued', actorId: context.actorId, subjectIds: [id], evidence: note ? { note } : {} });
+    return { id, installCode: formatInstallCode(id) };
   }
 
   // Nodes held by this Core. Operations across machines are conversations between Cores built from these.

@@ -8,6 +8,9 @@ const emptyLifecycleCounts = (): Record<CoreLifecycleStatus, number> => ({ PENDI
 /** Reference host store for local development and host tests. */
 export class InMemorySemaCoreHostStore extends InMemorySemaCoreStore implements CoreHostStore {
   private hostSettings: VersionedCoreHostSettings | null = null;
+  private topLevelIssued = BigInt(1);
+
+  async issueTopLevelValue() { this.topLevelIssued += BigInt(1); return this.topLevelIssued; }
 
   async getHostSettings() { return this.hostSettings ? structuredClone(this.hostSettings) : null; }
   async saveHostSettings(settings: VersionedCoreHostSettings) { this.hostSettings = structuredClone(settings); return structuredClone(settings); }

@@ -33,6 +33,9 @@ try {
   await prisma.$executeRaw`DELETE FROM "sema_local_nodes"`;
   await prisma.$executeRaw`DELETE FROM "sema_core_identity_state"`;
 
+  // The counter that assigns the first ID of each new system: value 1 is the original system, so it starts at 2.
+  assert.deepEqual([await host.issueTopLevelValue(), await host.issueTopLevelValue(), await host.issueTopLevelValue()], [BigInt(2), BigInt(3), BigInt(4)]);
+
   // Core's own start-up: the machine node is created on the first start and left alone on the next.
   await host.initializeIdentity('3');
   await host.initializeIdentity('3');

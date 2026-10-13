@@ -49,6 +49,11 @@ export interface CoreHostStore {
   saveHostSettings(settings: VersionedCoreHostSettings): Promise<VersionedCoreHostSettings>;
   getHostStatistics(): Promise<CoreHostStatistics>;
   getCapabilitiesForHost(): Promise<CoreCapability[]>;
+  /**
+   * The next value from the counter that assigns the first ID of each new system. One counter, held by the
+   * original system; it never goes backwards and never gives a value twice. Value 1 is the original system itself.
+   */
+  issueTopLevelValue(): Promise<bigint>;
 }
 
 export interface CoreHostAuthorization {

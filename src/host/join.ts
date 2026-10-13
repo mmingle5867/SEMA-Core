@@ -2,8 +2,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { encodeBase56 } from '../identity/base56.js';
 import type { NodeDescription } from '../topology/local-nodes.js';
+import { parseInstallCode } from './install-code.js';
 
-/** The first node of a system. It is the only node ID that is never issued by another node. */
+/** The first node of the original system: the only ID that was ever typed by hand. Its Core assigns the first ID of every other system. */
 export const FIRST_NODE_ID = encodeBase56(BigInt(1));
 
 /** What a new Core is told when it joins: its own node ID and the parent that issued it. */
@@ -11,18 +12,19 @@ export interface JoinRequest { id: string; parentId: string; parentAddress?: str
 
 /**
  * Decides how a Core starts. A Core that already has an identity in its database runs as that node, and
- * nothing in its settings can change it. A Core with none waits to be joined to a system by a node that is
- * already in one, unless it was told on purpose that it is the first node of a new system. An ID typed
- * into the settings never creates an identity.
+ * nothing in its settings can change it. A Core with none is either the first machine of a new system,
+ * which needs an install code carrying the ID assigned to that system, or it waits to be joined to a
+ * system by a node that is already in one. An ID typed into the settings never creates an identity.
  */
-export function resolveStart(input: { storedId?: string; configuredId?: string; startNewSystem?: boolean }): { mode: 'run'; installationId: string } | { mode: 'join' } {
+export function resolveStart(input: { storedId?: string; configuredId?: string; installCode?: string }): { mode: 'run'; installationId: string } | { mode: 'join' } {
   if (input.storedId) {
     if (input.configuredId && input.configuredId !== input.storedId) throw new Error(`SEMA_CORE_INSTALLATION_ID is ${input.configuredId}, but this Core is node ${input.storedId}. A Core's identity cannot be changed by its settings`);
     return { mode: 'run', installationId: input.storedId };
   }
-  if (input.startNewSystem) {
-    if (input.configuredId && input.configuredId !== FIRST_NODE_ID) throw new Error(`The first node of a new system is always ${FIRST_NODE_ID}. Remove SEMA_CORE_INSTALLATION_ID`);
-    return { mode: 'run', installationId: FIRST_NODE_ID };
+  if (input.installCode) {
+    const assigned = parseInstallCode(input.installCode);
+    if (input.configuredId && input.configuredId !== assigned) throw new Error(`SEMA_CORE_INSTALLATION_ID is ${input.configuredId}, but the install code assigns ${assigned}. Remove SEMA_CORE_INSTALLATION_ID`);
+    return { mode: 'run', installationId: assigned };
   }
   return { mode: 'join' };
 }

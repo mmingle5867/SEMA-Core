@@ -57,7 +57,7 @@ A Core's database says which node it is. An ID typed into its settings never cre
 | Its database | Its settings | What it does |
 | --- | --- | --- |
 | Has an identity | Anything | Runs as that node. If `SEMA_CORE_INSTALLATION_ID` is set and names a different node, it refuses to start. |
-| Has none | `SEMA_CORE_START_NEW_SYSTEM=yes` | Becomes the first node of a new system. Its ID is always `3`. |
+| Has none | `SEMA_CORE_INSTALL_CODE` set | Becomes the first machine of a new system, with the ID the install code assigns. A mistyped code stops the start. |
 | Has none | Nothing else | Waits to be joined. It answers its health (`NOT_JOINED`) and the join request, and refuses everything else. |
 
 **Joining**
@@ -72,6 +72,21 @@ Nobody types an ID. If the new Core refuses, the parent takes the child back off
 The join code proves the request comes from the person who set that machine up. It is never recorded. It is a stopgap, like the shared application secrets, until machines have key pairs. The new Core must be able to reach its parent afterwards, so the Core that installs it needs `SEMA_CORE_ADDRESS` set.
 
 Not built yet: handing the keyholder list to the new Core in the same step, and a System Console screen for installing a machine.
+
+## Starting a new system: install codes
+
+A new system is a separate tree with its own top node. Two systems can be merged later, by adding a parent above one and rehoming the other under it, but only if none of their IDs overlap. So no two systems may start from the same first ID.
+
+The first IDs from `3` up to `zzzzz` (550,731,775 of them) are reserved and assigned, never chosen or typed. `3` is the original system. The original system's Core holds one counter that gives out the rest, `4`, `5`, `6` and so on, one install code per new system. A company gets one code, for its first machine; after that it adds its own machines by joining them, with no further code.
+
+| Step | Where | What |
+| --- | --- | --- |
+| 1 | The original system | `POST /v1/core/authority/install-codes` `{note?}` returns `{id, installCode}`. Needs `core.authority.issue-install-code`, which nobody holds by default, and only node `3` can do it. The note says who the code is for and is kept in the audit trail. |
+| 2 | The new system's first machine | Put the code in `SEMA_CORE_INSTALL_CODE` in Core's `.env` and start Core. It records the assigned ID as its identity. |
+
+An install code looks like `S1.4.<check characters>`. The check characters catch a mistyped code. They do not stop someone inventing a code for a reserved ID: that needs a keyholder signature, which a later version of the code carries in the same place.
+
+A first ID of six or more characters is outside the reserve. Starting a system that way is allowed by the design but is not built.
 
 ## Adding a parent above a top node
 
