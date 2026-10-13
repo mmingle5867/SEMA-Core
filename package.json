@@ -22,6 +22,7 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "tsx test/core.test.ts && tsx test/base56.test.ts && tsx test/core-host.test.ts && tsx test/http.test.ts && tsx test/credentials.test.ts && tsx test/local-nodes.test.ts && tsx test/local-nodes-host.test.ts && tsx test/conversations.test.ts && tsx test/core-to-core.test.ts && tsx test/topology-operations.test.ts",
     "test:host": "tsx test/core-host.test.ts",
+    "test:postgres": "tsx test/postgres-local-nodes.test.ts",
     "typecheck": "tsc --noEmit",
     "prisma:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",

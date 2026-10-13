@@ -1,4 +1,4 @@
-import type { NodeDescription, NodeKind } from './local-nodes.js';
+import type { NodeDescription, NodeType } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -6,7 +6,7 @@ import type { NodeDescription, NodeKind } from './local-nodes.js';
  */
 export interface NodePeer {
   describe(id: string): Promise<NodeDescription | undefined>;
-  accept(input: { id: string; kind: NodeKind; parentId?: string; parentAddress?: string }): Promise<NodeDescription>;
+  accept(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }): Promise<NodeDescription>;
   issueChildId(id: string): Promise<{ value: string; childCount: number }>;
   issueBasis(id: string): Promise<{ value: string }>;
   setParent(id: string, parentId: string, parentAddress?: string): Promise<NodeDescription>;
@@ -108,11 +108,11 @@ export class Conversations {
    * records it. Also covers installing a machine and adding a user, where the issuer is an organization node.
    * If recording fails the ID is simply left unused, and the parent takes the child back off its count.
    */
-  async createNode(input: { parentId: string; parentAddress?: string; kind: NodeKind; newNodePeer: NodePeer }) {
+  async createNode(input: { parentId: string; parentAddress?: string; type: NodeType; newNodePeer: NodePeer }) {
     const parent = await this.mustPeer(input.parentId, 'The issuing parent', input.parentAddress);
     const issued = await parent.issueChildId(input.parentId);
     try {
-      return await input.newNodePeer.accept({ id: issued.value, kind: input.kind, parentId: input.parentId, parentAddress: input.parentAddress });
+      return await input.newNodePeer.accept({ id: issued.value, type: input.type, parentId: input.parentId, parentAddress: input.parentAddress });
     } catch (error) {
       await parent.adjustChildCount(input.parentId, -1).catch(() => undefined);
       throw error;
@@ -120,14 +120,14 @@ export class Conversations {
   }
 
   /** Inserts a new node between a node and its parent. */
-  async insertAbove(input: { childId: string; childAddress?: string; kind: NodeKind; newNodePeer: NodePeer; newNodeAddress?: string }) {
+  async insertAbove(input: { childId: string; childAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string }) {
     const child = await this.describeNode(input.childId, input.childAddress);
     if (typeof child === 'string') throw new Error(`The node is not reachable: ${input.childId}`);
     if (!child.parentId) throw new Error('A top node has no parent to insert under');
     const parentId = child.parentId;
     const parent = await this.mustPeer(parentId, 'The parent', child.parentAddress);
     const issued = await parent.issueChildId(parentId);            // parent's count +1
-    await input.newNodePeer.accept({ id: issued.value, kind: input.kind, parentId, parentAddress: child.parentAddress });
+    await input.newNodePeer.accept({ id: issued.value, type: input.type, parentId, parentAddress: child.parentAddress });
     await input.newNodePeer.adjustChildCount(issued.value, 1);      // the new node now has one child
     await (await this.mustPeer(input.childId, 'The node', input.childAddress)).setParent(input.childId, issued.value, input.newNodeAddress);
     await parent.adjustChildCount(parentId, -1);                    // the parent gave up the child; last, so a failure leaves it high
