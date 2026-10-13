@@ -34,6 +34,26 @@ export class HttpNodePeer implements NodePeer {
 }
 
 /**
+ * A Core that has no identity yet, reached only to give it one. It answers a single request, join, which
+ * records the node another Core issued for it. The join code was set on that machine before its first start.
+ * It holds no nodes yet, so every other question is an error.
+ */
+export function joiningPeer(baseUrl: string, joinCode: string, timeoutMs = 10_000): NodePeer {
+  const notYet = async (): Promise<never> => { throw new Error('A Core that has not joined yet holds no nodes'); };
+  return {
+    async accept(input) {
+      if (input.type !== 'MACHINE') throw new Error('A joining Core is recorded as a MACHINE node');
+      if (!input.parentId) throw new Error('A joining Core needs the parent that issued its ID');
+      const response = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/core/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: input.id, parentId: input.parentId, parentAddress: input.parentAddress, joinCode }), signal: AbortSignal.timeout(timeoutMs) });
+      const payload = await response.json().catch(() => null) as NodeDescription | { error?: { message?: string } } | null;
+      if (!response.ok) throw new Error((payload && typeof payload === 'object' && 'error' in payload ? payload.error?.message : undefined) ?? `The new Core refused to join (${response.status})`);
+      return payload as NodeDescription;
+    },
+    describe: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, adjustChildCount: notYet, retire: notYet, acceptRetired: notYet,
+  };
+}
+
+/**
  * Finds a node's Core by the address stored beside the pointer that led to it. A node held on this
  * machine is answered locally. Nothing is cached, so a rehome or a moved machine never leaves stale entries here.
  */

@@ -12,8 +12,28 @@ if (!url) { console.log('PostgreSQL local nodes test skipped (SEMA_CORE_TEST_DAT
 
 const prisma = new PrismaClient({ datasources: { db: { url } } });
 try {
-  // Core's own start-up: the machine node is created on the first start and left alone on the next.
   const host = new PrismaSemaCoreHostStore(prisma);
+  // This test empties the node tables part-way, so it refuses any database that already has an identity.
+  assert.equal(await host.storedInstallationId(), undefined, 'the test database must be empty: it must never be the live one');
+
+  // A new machine joins: another Core issued its ID, and it records its identity and its machine node together, once.
+  assert.deepEqual(await host.joinSystem({ id: '3-J', parentId: '3', parentAddress: 'http://parent.example:4310' }), { id: '3-J', type: 'MACHINE', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-J', childCount: 0, status: 'ACTIVE' });
+  assert.equal(await host.storedInstallationId(), '3-J');
+  await assert.rejects(() => host.joinSystem({ id: '3-K', parentId: '3' }), /already joined/);
+  assert.equal(await host.storedInstallationId(), '3-J', 'a second join changes nothing');
+  // Starting afterwards keeps the node as it was recorded, with its parent, and issues from it.
+  assert.equal((await host.initializeIdentity('3-J')).installationId, '3-J');
+  await assert.rejects(() => host.initializeIdentity('3'), /unavailable/);
+  assert.deepEqual(await new LocalNodes(new PrismaLocalNodeStore(prisma)).describe('3-J'), { id: '3-J', type: 'MACHINE', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-J', childCount: 0, status: 'ACTIVE' });
+  assert.equal((await host.reserveIdentifiers({ count: 1, metadata: {} })).identifiers[0].id, '3-J-3', 'a joined machine issues its IDs from its own node');
+
+  // Back to an empty database for the rest: the first node of a new system.
+  await prisma.$executeRaw`DELETE FROM "sema_issued_identifiers"`;
+  await prisma.$executeRaw`DELETE FROM "sema_identifier_reservations"`;
+  await prisma.$executeRaw`DELETE FROM "sema_local_nodes"`;
+  await prisma.$executeRaw`DELETE FROM "sema_core_identity_state"`;
+
+  // Core's own start-up: the machine node is created on the first start and left alone on the next.
   await host.initializeIdentity('3');
   await host.initializeIdentity('3');
   const nodes = new LocalNodes(new PrismaLocalNodeStore(prisma));
