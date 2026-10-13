@@ -80,6 +80,15 @@ export class LocalNodes {
 
   async list() { return (await this.store.list()).map((node) => this.describeNode(node)); }
 
+  /**
+   * The nodes held here as this machine's own administrator sees them: each with the next ID it would issue,
+   * which is its basis plus the next number from its counter. A retired node issues nothing, so it has none.
+   * The value is a reading, not a promise: on the machine's own node it moves with every ID Core issues.
+   */
+  async listWithNextId() {
+    return (await this.store.list()).map((node) => ({ ...this.describeNode(node), ...(node.status === 'ACTIVE' ? { nextId: `${node.basis}-${encodeBase56(node.issued + BigInt(1))}` } : {}) }));
+  }
+
   async describe(id: string) {
     const node = await this.store.get(id);
     return node ? this.describeNode(node) : undefined;

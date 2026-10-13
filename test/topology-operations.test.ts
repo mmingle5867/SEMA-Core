@@ -43,7 +43,7 @@ assert.equal(r.payload.id, '3-3-3');
 
 // What A holds, and walking up from a node on C.
 r = await call(A, 'GET', '/v1/core/topology/local');
-assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.type]), [['3', 'MACHINE'], ['3-4', 'USER']]);
+assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.type, n.nextId]), [['3', 'MACHINE', '3-5'], ['3-4', 'USER', '3-4-3']]);
 r = await call(A, 'GET', `/v1/core/topology/walk-up?nodeId=3-3-3&nodeAddress=${encodeURIComponent(C.address)}`);
 assert.deepEqual(r.payload.chain.map((n: any) => n.id), ['3-3', '3']);
 
