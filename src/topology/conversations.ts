@@ -13,6 +13,7 @@ export interface NodePeer {
   setBasis(id: string, basis: string): Promise<{ previousBasis: string; basis: string }>;
   adjustChildCount(id: string, delta: number): Promise<{ childCount: number }>;
   retire(id: string): Promise<{ parentId?: string; parentAddress?: string; childCount: number }>;
+  acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }): Promise<NodeDescription>;
 }
 
 /**
@@ -156,6 +157,39 @@ export class Conversations {
     await input.newNodePeer.adjustChildCount(fresh.value, 1);       // counted before the pointer moves, so a failure leaves it high
     await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, fresh.value, input.newNodeAddress);
     return { id: fresh.value, childId: input.nodeId, issuerId: issuer.id };
+  }
+
+  /**
+   * Records that a node was lost and names the node that replaced it. The replacement already exists: it was
+   * created like any other node, with a new ID that is its new basis. This adds the lost node's children to
+   * the replacement's count, records the lost ID as retired on the replacement's Core with its pointer naming
+   * the replacement, and takes the lost node off its old parent's count.
+   *
+   * Nobody holds a list of the lost node's children, so they are not contacted. Each one finds its parent
+   * retired when it next connects and follows the pointer to the replacement (see repairParent). For that the
+   * retired record must be at the address the children already hold.
+   *
+   * The child count is entered by a person, because the lost node's own record is gone. It must not be too low.
+   * Steps are ordered so a failure leaves a count too high: the replacement is counted up first, and the old
+   * parent is counted down last. If the old parent cannot be reached its count stays one too high.
+   */
+  async replaceLost(input: { lostId: string; type: NodeType; replacementId: string; replacementAddress?: string; childCount: number; lostParentId?: string; lostParentAddress?: string }) {
+    if (!Number.isSafeInteger(input.childCount) || input.childCount < 0) throw new Error('childCount must be a whole number, zero or more');
+    if (input.replacementId === input.lostId) throw new Error('A lost node needs a different node as its replacement');
+    if (input.lostParentId === input.lostId) throw new Error('A node cannot be its own parent');
+    const replacement = await this.describeNode(input.replacementId, input.replacementAddress);
+    if (typeof replacement === 'string') throw new Error(`The replacement is not reachable: ${input.replacementId}`);
+    if (replacement.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.replacementId}`);
+    const holder = await this.mustPeer(input.replacementId, 'The replacement', input.replacementAddress);
+    if (await holder.describe(input.lostId)) throw new Error(`Node ${input.lostId} is still recorded on the replacement's Core, so it is not lost. Use remove instead`);
+    if (input.childCount) await holder.adjustChildCount(input.replacementId, input.childCount);
+    await holder.acceptRetired({ id: input.lostId, type: input.type, replacementId: input.replacementId, replacementAddress: input.replacementAddress });
+    let oldParentCountStale = false;
+    if (input.lostParentId) {
+      const parent = await this.peer(input.lostParentId, input.lostParentAddress);
+      if (parent) { try { await parent.adjustChildCount(input.lostParentId, -1); } catch { oldParentCountStale = true; } } else oldParentCountStale = true;
+    }
+    return { lostId: input.lostId, replacementId: input.replacementId, childCount: input.childCount, oldParentCountStale };
   }
 
   /**

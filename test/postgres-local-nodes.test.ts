@@ -39,6 +39,12 @@ try {
   await nodes.retire('3-T3');
   assert.deepEqual(await nodes.describe('3-T3'), { id: '3-T3', type: 'USER', parentId: '3-T1', basis: '3-T3', childCount: 0, status: 'RETIRED' });
 
+  // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
+  assert.deepEqual(await nodes.acceptRetired({ id: '3-T7', type: 'GROUP', replacementId: '3-T2', replacementAddress: 'http://here.example:4310' }), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
+  assert.deepEqual(await nodes.describe('3-T7'), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
+  await assert.rejects(() => nodes.issueChildId('3-T7'), /retired/);
+  await assert.rejects(() => nodes.acceptRetired({ id: '3-T2', type: 'GROUP', replacementId: '3-T1' }), /already exists/);
+
   // A row with a type Core does not know is reported, never read as something else.
   await prisma.$executeRaw`UPDATE "sema_local_nodes" SET "type" = 'PRINTER' WHERE "id" = '3-T4'`;
   await assert.rejects(() => nodes.describe('3-T4'), /unknown type/);
