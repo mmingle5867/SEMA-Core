@@ -135,6 +135,30 @@ export class Conversations {
   }
 
   /**
+   * Adds a parent above a top node, so the tree can grow from the ground up. The top node has no parent to
+   * issue the new node's ID, so another node issues it: the one named, or the one with the shortest basis
+   * among the top node itself and the nodes offered in `alsoConsider`. A shorter basis keeps the new ID short,
+   * and any counter gives a unique value, so the choice of issuer never affects uniqueness.
+   * The value is the issuer's basis plus its next number, and is not the issuer's child, so its count is unchanged.
+   * If a later step fails the value is simply left unused, or the new node is left counting a child it does not have.
+   */
+  async addParentAbove(input: { nodeId: string; nodeAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string; issuerId?: string; issuerAddress?: string; alsoConsider?: Array<{ id: string; basis: string; address?: string }> }) {
+    const top = await this.describeNode(input.nodeId, input.nodeAddress);
+    if (typeof top === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
+    if (top.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
+    if (top.parentId) throw new Error('This node already has a parent. Use insert-above to put a node between them');
+    const candidates = [{ id: top.id, basis: top.basis, address: input.nodeAddress }, ...(input.alsoConsider ?? [])];
+    const issuer = input.issuerId
+      ? { id: input.issuerId, address: input.issuerAddress }
+      : candidates.reduce((best, candidate) => (segments(candidate.basis) < segments(best.basis) || (segments(candidate.basis) === segments(best.basis) && candidate.basis.length < best.basis.length) ? candidate : best));
+    const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
+    await input.newNodePeer.accept({ id: fresh.value, type: input.type });
+    await input.newNodePeer.adjustChildCount(fresh.value, 1);       // counted before the pointer moves, so a failure leaves it high
+    await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, fresh.value, input.newNodeAddress);
+    return { id: fresh.value, childId: input.nodeId, issuerId: issuer.id };
+  }
+
+  /**
    * Moves a node, and its subtree, under a new parent. Only moving a node under itself is refused:
    * a cycle needs an operator to move a node under its own descendant, and walking up to prove otherwise
    * would let an offline machine block a legitimate move. If a cycle ever formed, walking up reports it.
