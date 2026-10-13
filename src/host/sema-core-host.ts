@@ -164,6 +164,7 @@ export class SemaCoreHost {
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
         { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
+        { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
         { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
@@ -233,8 +234,8 @@ export class SemaCoreHost {
     if (!peer) throw new CoreHostValidationError(`The Core at ${address} is not reachable`);
     return peer;
   }
-  private async conversation<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (talk: Conversations) => Promise<T>, evidence: (result: T) => JsonObject = () => ({})) {
-    await this.requireAdministration(context, 'core.topology.write');
+  private async conversation<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (talk: Conversations) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
+    await this.requireAdministration(context, permission);
     const result = await work(this.conversations());
     await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
     return result;
@@ -261,6 +262,22 @@ export class SemaCoreHost {
       const inserted = await talk.insertAbove({ childId, childAddress: this.address(input.childAddress, 'childAddress'), type, newNodePeer: await this.placement(newNodeAddress), newNodeAddress });
       return { ...inserted, address: newNodeAddress ?? null };
     }, (result) => ({ id: result.id, type, parentId: result.parentId, address: result.address }));
+  }
+  /**
+   * Adds a parent above a top node. This is a change at the top of the tree, so it has its own permission,
+   * `core.authority.add-top`, which no grant of `core.topology.*` covers. It is granted by hand for the one
+   * occasion until keyholder signatures replace it. The new ID is issued by the node named, or by the one with
+   * the shortest basis among the top node and the active nodes this Core holds.
+   */
+  topologyAddParentAbove(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; type: NodeType; newNodeAddress?: string; issuerId?: string; issuerAddress?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), type = this.nodeType(input.type);
+    const issuerId = input.issuerId ? this.text(input.issuerId, 'issuerId') : undefined;
+    return this.conversation(context, 'core.topology.parent-added-above-top', [nodeId, ...(issuerId ? [issuerId] : [])], async (talk) => {
+      const newNodeAddress = this.address(input.newNodeAddress, 'newNodeAddress');
+      const alsoConsider = (await this.requireNodes().list()).filter((node) => node.status === 'ACTIVE').map((node) => ({ id: node.id, basis: node.basis, address: this.ownAddress() }));
+      const added = await talk.addParentAbove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), type, newNodePeer: await this.placement(newNodeAddress), newNodeAddress, issuerId, issuerAddress: issuerId ? this.address(input.issuerAddress, 'issuerAddress') : undefined, alsoConsider });
+      return { ...added, type, address: newNodeAddress ?? null };
+    }, (result) => ({ id: result.id, type, childId: result.childId, issuerId: result.issuerId, address: result.address }), 'core.authority.add-top');
   }
   /** Moves a node and everything below it under a new parent. Only a move under itself is refused. */
   topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {
