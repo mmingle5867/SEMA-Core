@@ -48,6 +48,30 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     if (!row || row.status !== 'ACTIVE') throw new Error('SEMA Core machine node is unavailable');
     return { basis: row.basis, issued: BigInt(row.issued) };
   }
+  /** The node this Core is, once it has an identity. Undefined on a Core that has not joined a system yet. */
+  async storedInstallationId() {
+    const state = await this.prisma.semaCoreIdentityState.findUnique({ where: { stateKey: STATE_KEY } });
+    return state?.installationId;
+  }
+  /**
+   * Gives a Core that has none its identity: the node ID another Core issued for it, and the parent that issued it.
+   * Both records are written together, and only once: a Core that already has an identity refuses.
+   */
+  async joinSystem(input: { id: string; parentId: string; parentAddress?: string }) {
+    await this.prisma.$transaction(async (tx) => {
+      const created = await tx.$executeRaw`
+        INSERT INTO "sema_core_identity_state" ("stateKey", "installationId", "nextLocalId", "status", "updatedAt")
+        VALUES (${STATE_KEY}, ${input.id}, 1, 'ACTIVE', NOW())
+        ON CONFLICT ("stateKey") DO NOTHING`;
+      if (created !== 1) throw new Error('This Core has already joined a system');
+      const recorded = await tx.$executeRaw`
+        INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
+        VALUES (${input.id}, 'MACHINE', ${input.parentId}, ${input.parentAddress ?? null}, ${input.id}, 0, 0, 'ACTIVE', NOW(), NOW())
+        ON CONFLICT ("id") DO NOTHING`;
+      if (recorded !== 1) throw new Error(`Node already exists: ${input.id}`);
+    });
+    return { id: input.id, type: 'MACHINE' as const, parentId: input.parentId, ...(input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, childCount: 0, status: 'ACTIVE' as const };
+  }
   async initializeIdentity(installationId: string) {
     const state = await this.prisma.semaCoreIdentityState.upsert({ where: { stateKey: STATE_KEY }, update: {}, create: { stateKey: STATE_KEY, installationId, nextLocalId: BigInt(1) } });
     if (state.installationId !== installationId || state.status !== 'ACTIVE') throw new Error('SEMA Core installation is unavailable');

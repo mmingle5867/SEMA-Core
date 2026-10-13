@@ -20,6 +20,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `GET /v1/core/topology/local` | The nodes this Core holds, each with `nextId` (the next ID it would issue: its basis plus the next number), and its own address. A retired node has no `nextId`. |
 | `GET /v1/core/topology/walk-up?nodeId=&nodeAddress=` | Parents in turn; stops where a machine cannot be reached. |
 | `POST /v1/core/topology/create` `{parentId, parentAddress?, type, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
+| `POST /v1/core/topology/install-machine` `{parentId, parentAddress?, newCoreAddress, joinCode}` | Installs a new machine: issues a node ID and gives it to a Core that has no identity yet. See below. |
 | `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/add-parent-above` `{nodeId, nodeAddress?, type, newNodeAddress?, issuerId?, issuerAddress?}` | New parent above a node that has none, so the tree grows from the ground up. Needs `core.authority.add-top`, not `core.topology.write`. See below. |
 | `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, childCount, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
@@ -46,6 +47,31 @@ Finer detail (laptop, printer, sales department) is a description kept by Founda
 The type is named when the node is created and recorded once, by the Core that holds the node. A create or insert without it is refused before any number is issued. Nothing changes it afterwards: not a rehome, a roll-up or a removal. A different type is a new node with a new ID.
 
 A machine's own node is a `MACHINE`. Seat limits are not built yet.
+
+## Installing a new machine
+
+A Core's database says which node it is. An ID typed into its settings never creates an identity, so a machine set up from a copy of another machine's `.env` cannot start as that machine.
+
+**How a Core starts**
+
+| Its database | Its settings | What it does |
+| --- | --- | --- |
+| Has an identity | Anything | Runs as that node. If `SEMA_CORE_INSTALLATION_ID` is set and names a different node, it refuses to start. |
+| Has none | `SEMA_CORE_START_NEW_SYSTEM=yes` | Becomes the first node of a new system. Its ID is always `3`. |
+| Has none | Nothing else | Waits to be joined. It answers its health (`NOT_JOINED`) and the join request, and refuses everything else. |
+
+**Joining**
+
+1. On the new machine, set `SEMA_CORE_JOIN_CODE` in Core's `.env` to a random value, and start Core. It waits.
+2. On a Core already in the system, call `install-machine` with the parent node, the new machine's address and the join code.
+3. The parent's Core issues the ID from its counter and counts the child, as for any node, and sends the ID, the parent pointer and the join code to the new Core.
+4. The new Core checks the code, records its identity and its machine node together, and carries on starting as a normal Core. It never joins a second time.
+
+Nobody types an ID. If the new Core refuses, the parent takes the child back off its count and the number is left unused.
+
+The join code proves the request comes from the person who set that machine up. It is never recorded. It is a stopgap, like the shared application secrets, until machines have key pairs. The new Core must be able to reach its parent afterwards, so the Core that installs it needs `SEMA_CORE_ADDRESS` set.
+
+Not built yet: handing the keyholder list to the new Core in the same step, and a System Console screen for installing a machine.
 
 ## Adding a parent above a top node
 

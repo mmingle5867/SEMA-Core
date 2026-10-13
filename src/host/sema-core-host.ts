@@ -8,7 +8,12 @@ import { isNodeType, type LocalNodes, type NodeType } from '../topology/local-no
 import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
-export interface CoreTopologyOptions { peers: AddressedPeers; address?: string }
+export interface CoreTopologyOptions {
+  peers: AddressedPeers;
+  address?: string;
+  /** Reaches a Core that has no identity yet, to give it one. Needed only to install a new machine. */
+  joining?: (address: string, joinCode: string) => NodePeer;
+}
 
 const settingsKeys = Object.keys(DEFAULT_CORE_HOST_SETTINGS) as Array<keyof CoreHostSettings>;
 const settingsKeySet = new Set<string>(settingsKeys);
@@ -163,6 +168,7 @@ export class SemaCoreHost {
         { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds, each with the next ID it would issue, and the address other Cores use to reach it.' },
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
+        { method: 'POST', path: '/v1/core/topology/install-machine', purpose: 'Install a new machine: issue a node ID from a parent and give it to a Core that has no identity yet, using that machine\'s join code.' },
         { method: 'POST', path: '/v1/core/topology/insert-above', purpose: 'Insert a new node of a given type (ORGANIZATION, GROUP, USER or MACHINE) between a node and its parent.' },
         { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
         { method: 'POST', path: '/v1/core/topology/replace-lost', purpose: 'Record that a node was lost and name the node that replaced it; its children follow the retired record to the replacement. Needs the permission core.authority.replace-lost.' },
@@ -257,6 +263,24 @@ export class SemaCoreHost {
       const created = await talk.createNode({ parentId, parentAddress, type, newNodePeer: await this.placement(newNodeAddress) });
       return { ...created, address: newNodeAddress ?? null };
     }, (result) => ({ id: result.id, type, parentId, address: result.address }));
+  }
+  /**
+   * Installs a new machine: gives a Core that has no identity yet its node ID. The parent's Core issues the ID
+   * and counts the child, as for any node, and the new Core records it as its own machine node. Nobody types an ID.
+   * The join code proves the request comes from the person who set that machine up. It is never recorded.
+   * The new Core must be able to reach its parent afterwards, so the parent's address has to be known.
+   */
+  topologyInstallMachine(context: CoreHostRequestContext, input: { parentId: string; parentAddress?: string; newCoreAddress: string; joinCode: string }) {
+    const parentId = this.text(input.parentId, 'parentId'), newCoreAddress = this.text(input.newCoreAddress, 'newCoreAddress').replace(/\/$/, ''), joinCode = this.text(input.joinCode, 'joinCode');
+    return this.conversation(context, 'core.topology.machine-installed', [parentId], async (talk) => {
+      const joining = this.topology?.joining;
+      if (!joining) throw new CoreHostValidationError('This Core is not set up to install new machines');
+      if (newCoreAddress === this.ownAddress()) throw new CoreHostValidationError('The new machine cannot be this Core');
+      const parentAddress = this.address(input.parentAddress, 'parentAddress');
+      if (!parentAddress) throw new CoreHostValidationError('The new machine must be able to reach its parent. Set SEMA_CORE_ADDRESS on this Core, or give parentAddress');
+      const created = await talk.createNode({ parentId, parentAddress, type: 'MACHINE', newNodePeer: joining(newCoreAddress, joinCode) });
+      return { ...created, address: newCoreAddress };
+    }, (result) => ({ id: result.id, type: 'MACHINE', parentId, address: result.address }));
   }
   /** Inserts a new node between a node and its parent. */
   topologyInsertAbove(context: CoreHostRequestContext, input: { childId: string; childAddress?: string; type: NodeType; newNodeAddress?: string }) {
