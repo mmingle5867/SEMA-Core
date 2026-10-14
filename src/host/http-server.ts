@@ -107,11 +107,14 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve') return write(response, 200, await host.resolveCapability(context, await readJson(request) as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes') return write(response, 200, await host.nodeDescribe(context, { id: url.searchParams.get('id') ?? '' }));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept') return write(response, 201, await host.nodeAccept(context, await readJson(request) as Parameters<typeof host.nodeAccept>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-child') return write(response, 201, await host.nodeIssueChild(context, await readJson(request) as { nodeId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-child') return write(response, 201, await host.nodeIssueChild(context, await readJson(request) as Parameters<typeof host.nodeIssueChild>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-basis') return write(response, 201, await host.nodeIssueBasis(context, await readJson(request) as { nodeId: string }));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-parent') return write(response, 200, await host.nodeSetParent(context, await readJson(request) as { nodeId: string; parentId: string; parentAddress?: string }));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-basis') return write(response, 200, await host.nodeSetBasis(context, await readJson(request) as { nodeId: string; basis: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-count') return write(response, 200, await host.nodeAdjustChildCount(context, await readJson(request) as { nodeId: string; delta: number }));
+    if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes/children') return write(response, 200, await host.nodeChildren(context, { id: url.searchParams.get('id') ?? '' }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/add-children') return write(response, 200, await host.nodeAddChildren(context, await readJson(request) as Parameters<typeof host.nodeAddChildren>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/remove-child') return write(response, 200, await host.nodeRemoveChild(context, await readJson(request) as Parameters<typeof host.nodeRemoveChild>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-list-complete') return write(response, 200, await host.nodeSetChildListComplete(context, await readJson(request) as Parameters<typeof host.nodeSetChildListComplete>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept-retired') return write(response, 201, await host.nodeAcceptRetired(context, await readJson(request) as Parameters<typeof host.nodeAcceptRetired>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire') return write(response, 200, await host.nodeRetire(context, await readJson(request) as { nodeId: string }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/local') return write(response, 200, await host.topologyLocal(context));
@@ -128,6 +131,8 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/remove') return write(response, 200, await host.topologyRemove(context, await readJson(request) as Parameters<typeof host.topologyRemove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/roll-up') return write(response, 200, await host.topologyRollUp(context, await readJson(request) as Parameters<typeof host.topologyRollUp>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/repair-parent') return write(response, 200, await host.topologyRepairParent(context, await readJson(request) as Parameters<typeof host.topologyRepairParent>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-children') return write(response, 200, await host.topologyCheckChildren(context, await readJson(request) as Parameters<typeof host.topologyCheckChildren>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/mark-child-list') return write(response, 200, await host.topologyMarkChildList(context, await readJson(request) as Parameters<typeof host.topologyMarkChildList>[1]));
     return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
   } catch (error) {
     const { status, code, message } = classify(error);

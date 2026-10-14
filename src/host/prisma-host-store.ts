@@ -84,8 +84,8 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
         ON CONFLICT ("stateKey") DO NOTHING`;
       if (created !== 1) throw new Error('This Core has already joined a system');
       const recorded = await tx.$executeRaw`
-        INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
-        VALUES (${input.id}, 'MACHINE', ${input.parentId}, ${input.parentAddress ?? null}, ${input.id}, 0, 0, 'ACTIVE', NOW(), NOW())
+        INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "createdAt", "updatedAt")
+        VALUES (${input.id}, 'MACHINE', ${input.parentId}, ${input.parentAddress ?? null}, ${input.id}, 0, true, 'ACTIVE', NOW(), NOW())
         ON CONFLICT ("id") DO NOTHING`;
       if (recorded !== 1) throw new Error(`Node already exists: ${input.id}`);
     });
@@ -96,8 +96,8 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     if (state.installationId !== installationId || state.status !== 'ACTIVE') throw new Error('SEMA Core installation is unavailable');
     // The machine node is created on first start from the existing counter, so IDs already issued are untouched. Its type is MACHINE.
     await this.prisma.$executeRaw`
-      INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childCount", "status", "createdAt", "updatedAt")
-      VALUES (${installationId}, 'MACHINE', NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, 0, 'ACTIVE', NOW(), NOW())
+      INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "createdAt", "updatedAt")
+      VALUES (${installationId}, 'MACHINE', NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, true, 'ACTIVE', NOW(), NOW())
       ON CONFLICT ("id") DO NOTHING`;
     const node = await this.machineNode();
     return { installationId: state.installationId, nextLocalId: node.issued + BigInt(1), status: state.status as 'ACTIVE' | 'SUSPENDED' };

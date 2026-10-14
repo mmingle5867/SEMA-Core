@@ -63,18 +63,28 @@ try {
   assert.equal((await nodes.listWithNextId()).find((node) => node.id === '3-T1')!.nextId, '3-T1-3');
 
   // Changes keep the type: issuing, moving, rolling up and retiring.
-  assert.equal((await nodes.issueChildId('3-T1')).value, '3-T1-3');
+  assert.deepEqual(await nodes.issueChildId('3-T1', { type: 'GROUP', address: 'http://child.example:4310' }), { value: '3-T1-3', childCount: 1 });
+  assert.deepEqual(await nodes.children('3-T1'), [{ childId: '3-T1-3', type: 'GROUP', address: 'http://child.example:4310' }], 'an issued child is on the list in the same step');
   assert.equal((await nodes.setParent('3-T3', '3-T1')).type, 'USER');
   await nodes.accept({ id: '3-T1-3-3', type: 'GROUP', parentId: '3-T1-3' });
   assert.deepEqual(await nodes.setBasis('3-T1-3-3', '3-T9'), { previousBasis: '3-T1-3-3', basis: '3-T9' });
-  assert.equal((await nodes.adjustChildCount('3-T1', 1)).childCount, 2);
-  await nodes.retire('3-T3');
-  assert.deepEqual(await nodes.describe('3-T3'), { id: '3-T3', type: 'USER', parentId: '3-T1', basis: '3-T3', childCount: 0, status: 'RETIRED' });
+  assert.deepEqual(await nodes.addChildren('3-T1', [{ childId: '3-T3', type: 'USER' }, { childId: '3-T1-3', type: 'GROUP', address: 'http://moved.example:4310' }]), { childCount: 2 }, 'adding an entry already there updates it');
+  assert.equal((await nodes.children('3-T1')).find((child) => child.childId === '3-T1-3')!.address, 'http://moved.example:4310');
+  assert.deepEqual((await nodes.list()).find((node) => node.id === '3-T1')!.childCount, 2);
+  assert.deepEqual(await nodes.removeChild('3-T1', '3-T1-3'), { removed: true, childCount: 1 });
+  assert.deepEqual(await nodes.removeChild('3-T1', '3-T1-3'), { removed: false, childCount: 1 });
+  assert.deepEqual(await nodes.setChildListComplete('3-T2', false), { childListComplete: false });
+  assert.equal((await nodes.describe('3-T2'))!.childListIncomplete, true);
+  await nodes.setChildListComplete('3-T2', true);
+  assert.equal((await nodes.describe('3-T2'))!.childListIncomplete, undefined);
+  assert.deepEqual(await nodes.retire('3-T1'), { parentId: '3', parentAddress: 'http://parent.example:4310', children: [{ childId: '3-T3', type: 'USER' }], childListComplete: true });
+  assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, status: 'RETIRED' }, 'a retired node keeps its list');
+  await assert.rejects(() => nodes.addChildren('3-T1', [{ childId: '3-T8', type: 'USER' }]), /retired/);
 
   // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
   assert.deepEqual(await nodes.acceptRetired({ id: '3-T7', type: 'GROUP', replacementId: '3-T2', replacementAddress: 'http://here.example:4310' }), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
   assert.deepEqual(await nodes.describe('3-T7'), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
-  await assert.rejects(() => nodes.issueChildId('3-T7'), /retired/);
+  await assert.rejects(() => nodes.issueChildId('3-T7', { type: 'USER' }), /retired/);
   await assert.rejects(() => nodes.acceptRetired({ id: '3-T2', type: 'GROUP', replacementId: '3-T1' }), /already exists/);
 
   // A row with a type Core does not know is reported, never read as something else.

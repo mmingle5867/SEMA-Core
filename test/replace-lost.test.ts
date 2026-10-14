@@ -28,44 +28,46 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   // The replacement is created like any other node: a new ID, which is its new basis.
   const replacement = await talk.createNode({ parentId: '3', parentAddress: 'parent.example', type: 'GROUP', newNodePeer: rebuilt });
   assert.equal(replacement.id, '3-4', 'the old ID 3-3 is never issued again');
-  assert.equal((await parentCore.describe('3'))!.childCount, 2, 'the parent counts the lost node and its replacement');
+  assert.equal((await parentCore.describe('3'))!.childCount, 2, 'the parent lists the lost node and its replacement');
 
-  // The person records the loss, entering a child count that is not too low (the real number was 2).
-  const recorded = await talk.replaceLost({ lostId: '3-3', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', childCount: 3, lostParentId: '3', lostParentAddress: 'parent.example' });
-  assert.deepEqual(recorded, { lostId: '3-3', replacementId: '3-4', childCount: 3, oldParentCountStale: false });
+  // The person records the loss. Nobody knows the lost node's children, so the replacement's list is marked as possibly incomplete.
+  const recorded = await talk.replaceLost({ lostId: '3-3', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', lostParentId: '3', lostParentAddress: 'parent.example' });
+  assert.deepEqual(recorded, { lostId: '3-3', replacementId: '3-4', oldParentListStale: false });
   assert.deepEqual(await rebuilt.describe('3-3'), { id: '3-3', type: 'GROUP', parentId: '3-4', parentAddress: 'lost.example', basis: '3-3', childCount: 0, status: 'RETIRED' });
-  assert.equal((await rebuilt.describe('3-4'))!.childCount, 3, 'the replacement takes the children, counted high');
-  assert.equal((await parentCore.describe('3'))!.childCount, 1, 'the parent no longer counts the lost node');
+  assert.deepEqual(await rebuilt.describe('3-4'), { id: '3-4', type: 'GROUP', parentId: '3', parentAddress: 'parent.example', basis: '3-4', childCount: 0, childListIncomplete: true, status: 'ACTIVE' }, 'its list is empty, and marked as possibly incomplete');
+  assert.deepEqual((await parentCore.children('3')).map((child) => child.childId), ['3-4'], 'the parent no longer lists the lost node');
 
   // The old basis is closed: nothing is ever issued from it again. New children come from the new basis.
-  await assert.rejects(() => rebuilt.issueChildId('3-3'), /retired/);
+  await assert.rejects(() => rebuilt.issueChildId('3-3', { type: 'USER' }), /retired/);
   await assert.rejects(() => rebuilt.issueBasis('3-3'), /retired/);
   assert.equal((await rebuilt.listWithNextId()).find((node) => node.id === '3-3')!.nextId, undefined);
   assert.equal((await rebuilt.issueBasis('3-4')).value, '3-4-3');
 
-  // Each child fixes its own pointer when it next connects. Its ID never changes.
+  // Each child fixes its own pointer when it next connects, and adds itself to the replacement's list. Its ID never changes.
   assert.deepEqual(await talk.repairParent('3-3-3', 'child.example'), { changed: true, parentId: '3-4' });
+  assert.deepEqual(await rebuilt.children('3-4'), [{ childId: '3-3-3', type: 'USER', address: 'child.example' }], 'the replacement learns its children as they reconnect');
   assert.deepEqual(await childCore.describe('3-3-3'), { id: '3-3-3', type: 'USER', parentId: '3-4', parentAddress: 'lost.example', basis: '3-3-3', childCount: 0, status: 'ACTIVE' });
   assert.deepEqual((await talk.walkUp('3-3-3', 'child.example')).chain.map((node) => node.id), ['3-4', '3']);
   assert.equal((await childCore.describe('3-3-4'))!.parentId, '3-3', 'a child that has not connected yet still names the old ID');
   assert.deepEqual((await talk.walkUp('3-3-4', 'child.example')).chain.map((node) => [node.id, node.status]), [['3-3', 'RETIRED'], ['3-4', 'ACTIVE'], ['3', 'ACTIVE']], 'and can still walk up through the retired record');
 
   // Refusals. A node the Core still holds is not lost; the replacement must be live, reachable and different.
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-3', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', childCount: 0 }), /not lost/);
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-9', replacementAddress: 'lost.example', childCount: 0 }), /different node/);
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-8', replacementAddress: 'lost.example', childCount: 0 }), /not reachable/);
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-3', replacementAddress: 'lost.example', childCount: 0 }), /retired/);
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', childCount: -1 }), /whole number/);
-  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', childCount: 1.5 }), /whole number/);
+  await assert.rejects(() => talk.replaceLost({ lostId: '3-3', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example' }), /not lost/);
+  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-9', replacementAddress: 'lost.example' }), /different node/);
+  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-8', replacementAddress: 'lost.example' }), /not reachable/);
+  await assert.rejects(() => talk.replaceLost({ lostId: '3-9', type: 'GROUP', replacementId: '3-3', replacementAddress: 'lost.example' }), /retired/);
   assert.equal(await rebuilt.describe('3-9'), undefined, 'a refused request records nothing');
-  assert.equal((await rebuilt.describe('3-4'))!.childCount, 3);
+  assert.equal((await rebuilt.describe('3-4'))!.childCount, 1);
 
-  // A lost top node has no parent to count down. An old parent that cannot be reached is left one too high.
-  const top = await talk.replaceLost({ lostId: '7', type: 'ORGANIZATION', replacementId: '3-4', replacementAddress: 'lost.example', childCount: 0 });
-  assert.equal(top.oldParentCountStale, false);
-  const stale = await talk.replaceLost({ lostId: '8', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', childCount: 1, lostParentId: '9', lostParentAddress: 'gone.example' });
-  assert.equal(stale.oldParentCountStale, true);
-  assert.equal((await rebuilt.describe('3-4'))!.childCount, 4);
+  // A lost top node has no parent to take it off. An old parent that cannot be reached keeps the entry, one too many.
+  const top = await talk.replaceLost({ lostId: '7', type: 'ORGANIZATION', replacementId: '3-4', replacementAddress: 'lost.example' });
+  assert.equal(top.oldParentListStale, false);
+  const stale = await talk.replaceLost({ lostId: '8', type: 'GROUP', replacementId: '3-4', replacementAddress: 'lost.example', lostParentId: '9', lostParentAddress: 'gone.example' });
+  assert.equal(stale.oldParentListStale, true);
+
+  // An administrator says the list is complete once every child has come back.
+  assert.deepEqual(await talk.markChildList({ nodeId: '3-4', nodeAddress: 'lost.example', complete: true }), { childListComplete: true });
+  assert.equal((await rebuilt.describe('3-4'))!.childListIncomplete, undefined);
 }
 
 // Through the host: its own permission, on the operation and on the record another Core is asked to keep.
@@ -88,20 +90,19 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   };
   await nodes.accept({ id: '3', type: 'MACHINE' });
   await nodes.accept({ id: '3-4', type: 'GROUP', parentId: '3', parentAddress: address });
-  await nodes.adjustChildCount('3', 2); // the lost node 3-3 and its replacement 3-4
+  await nodes.addChildren('3', [{ childId: '3-3', type: 'GROUP' }, { childId: '3-4', type: 'GROUP' }]); // the lost node 3-3 and its replacement 3-4
 
-  const request = { lostId: '3-3', type: 'GROUP', replacementId: '3-4', childCount: 2, lostParentId: '3' };
+  const request = { lostId: '3-3', type: 'GROUP', replacementId: '3-4', lostParentId: '3' };
   assert.equal((await post('/v1/core/topology/replace-lost', request)).status, 403, 'being allowed to change the tree is not enough');
   assert.equal((await post('/v1/core/topology/nodes/accept-retired', { id: '3-3', type: 'GROUP', replacementId: '3-4' })).status, 403);
   assert.equal(await nodes.describe('3-3'), undefined, 'a refused request records nothing');
 
   granted.add('core.authority.replace-lost');
-  assert.equal((await post('/v1/core/topology/replace-lost', { ...request, childCount: undefined })).status, 400, 'the child count must be entered');
   assert.equal((await post('/v1/core/topology/replace-lost', { ...request, type: 'PRINTER' })).status, 400);
   const done = await post('/v1/core/topology/replace-lost', request);
   assert.equal(done.status, 201);
-  assert.deepEqual(done.payload, { lostId: '3-3', replacementId: '3-4', childCount: 2, oldParentCountStale: false });
-  assert.deepEqual((await nodes.list()).map((node) => [node.id, node.status, node.parentId ?? null, node.childCount]).sort(), [['3', 'ACTIVE', null, 1], ['3-3', 'RETIRED', '3-4', 0], ['3-4', 'ACTIVE', '3', 2]]);
+  assert.deepEqual(done.payload, { lostId: '3-3', replacementId: '3-4', oldParentListStale: false });
+  assert.deepEqual((await nodes.list()).map((node) => [node.id, node.status, node.parentId ?? null, node.childCount, node.childListIncomplete ?? false]).sort(), [['3', 'ACTIVE', null, 1, false], ['3-3', 'RETIRED', '3-4', 0, false], ['3-4', 'ACTIVE', '3', 0, true]]);
   assert.ok((await post('/v1/core/topology/replace-lost', request)).status >= 400, 'it cannot be recorded twice');
   server.close();
 }

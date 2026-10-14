@@ -1,4 +1,4 @@
-import type { NodeDescription, NodeType } from './local-nodes.js';
+import type { ChildEntry, NodeDescription, NodeType } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -7,12 +7,15 @@ import type { NodeDescription, NodeType } from './local-nodes.js';
 export interface NodePeer {
   describe(id: string): Promise<NodeDescription | undefined>;
   accept(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }): Promise<NodeDescription>;
-  issueChildId(id: string): Promise<{ value: string; childCount: number }>;
+  children(id: string): Promise<ChildEntry[]>;
+  issueChildId(id: string, child: { type: NodeType; address?: string }): Promise<{ value: string; childCount: number }>;
   issueBasis(id: string): Promise<{ value: string }>;
   setParent(id: string, parentId: string, parentAddress?: string): Promise<NodeDescription>;
   setBasis(id: string, basis: string): Promise<{ previousBasis: string; basis: string }>;
-  adjustChildCount(id: string, delta: number): Promise<{ childCount: number }>;
-  retire(id: string): Promise<{ parentId?: string; parentAddress?: string; childCount: number }>;
+  addChildren(id: string, children: ChildEntry[]): Promise<{ childCount: number }>;
+  removeChild(id: string, childId: string): Promise<{ removed: boolean; childCount: number }>;
+  setChildListComplete(id: string, complete: boolean): Promise<{ childListComplete: boolean }>;
+  retire(id: string): Promise<{ parentId?: string; parentAddress?: string; children: ChildEntry[]; childListComplete: boolean }>;
   acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }): Promise<NodeDescription>;
 }
 
@@ -42,10 +45,17 @@ export interface Ancestry {
 const segments = (basis: string) => basis.split('-').length;
 
 /**
+ * An entry on one node's list leaves out the address when the child is on the same Core as that node. When the
+ * entries move to a node on another Core, the address they were relative to is written in.
+ */
+const relocate = (entries: ChildEntry[], fromAddress?: string): ChildEntry[] => entries.map((child) => (child.address || !fromAddress ? child : { ...child, address: fromAddress }));
+
+/**
  * Operations that involve several machines, built from the single-node operations.
  *
- * Every procedure orders its steps so that a failure part-way leaves a child count too high and never
- * too low, because a count that is too high is the safe direction. Nothing here is cached: each call asks again.
+ * Every procedure orders its steps so that a failure part-way leaves a list of children with an entry too many
+ * and never one too few: a child is added to its new parent before it is taken off its old one. The child's own
+ * pointer remains the truth. Nothing here is cached: each call asks again.
  */
 export class Conversations {
   constructor(private readonly directory: PeerDirectory) {}
@@ -90,8 +100,9 @@ export class Conversations {
   }
 
   /**
-   * A child follows the chain past a retired parent and fixes its own pointer. Does nothing when the
-   * parent is live or cannot be reached.
+   * A child follows the chain past a retired parent and fixes its own pointer, adding itself to its new parent's
+   * list first. This is how a node that replaced a lost one learns its children. Does nothing when the parent is
+   * live or cannot be reached.
    */
   async repairParent(nodeId: string, address?: string) {
     const node = await this.describeNode(nodeId, address);
@@ -100,22 +111,26 @@ export class Conversations {
     if (typeof parent === 'string' || parent.status === 'ACTIVE') return { changed: false as const };
     const { ancestor } = await this.nearestLiveAncestor(nodeId, address);
     if (!ancestor) return { changed: false as const };
+    await (await this.mustPeer(ancestor.id, 'The ancestor', ancestor.address)).addChildren(ancestor.id, [{ childId: nodeId, type: node.type, ...(address ? { address } : {}) }]);
     await (await this.mustPeer(nodeId, 'Node', address)).setParent(nodeId, ancestor.id, ancestor.address);
     return { changed: true as const, parentId: ancestor.id };
   }
 
   /**
-   * Creates a node: the parent's Core issues the ID and counts the child, and the new node's own Core
+   * Creates a node: the parent's Core issues the ID and puts the child on its list, and the new node's own Core
    * records it. Also covers installing a machine and adding a user, where the issuer is an organization node.
-   * If recording fails the ID is simply left unused, and the parent takes the child back off its count.
+   * If recording fails, the ID is left unused. The entry is taken off the parent's list only when the new node's
+   * Core says plainly that it does not hold the node; if that cannot be known, the entry stays, one too many.
    */
-  async createNode(input: { parentId: string; parentAddress?: string; type: NodeType; newNodePeer: NodePeer }) {
+  async createNode(input: { parentId: string; parentAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string }) {
     const parent = await this.mustPeer(input.parentId, 'The issuing parent', input.parentAddress);
-    const issued = await parent.issueChildId(input.parentId);
+    const issued = await parent.issueChildId(input.parentId, { type: input.type, ...(input.newNodeAddress ? { address: input.newNodeAddress } : {}) });
     try {
       return await input.newNodePeer.accept({ id: issued.value, type: input.type, parentId: input.parentId, parentAddress: input.parentAddress });
     } catch (error) {
-      await parent.adjustChildCount(input.parentId, -1).catch(() => undefined);
+      let held: boolean | undefined;
+      try { held = Boolean(await input.newNodePeer.describe(issued.value)); } catch { held = undefined; }
+      if (held === false) await parent.removeChild(input.parentId, issued.value).catch(() => undefined);
       throw error;
     }
   }
@@ -127,11 +142,11 @@ export class Conversations {
     if (!child.parentId) throw new Error('A top node has no parent to insert under');
     const parentId = child.parentId;
     const parent = await this.mustPeer(parentId, 'The parent', child.parentAddress);
-    const issued = await parent.issueChildId(parentId);            // parent's count +1
+    const issued = await parent.issueChildId(parentId, { type: input.type, ...(input.newNodeAddress ? { address: input.newNodeAddress } : {}) });
     await input.newNodePeer.accept({ id: issued.value, type: input.type, parentId, parentAddress: child.parentAddress });
-    await input.newNodePeer.adjustChildCount(issued.value, 1);      // the new node now has one child
+    await input.newNodePeer.addChildren(issued.value, [{ childId: input.childId, type: child.type, ...(input.childAddress ? { address: input.childAddress } : {}) }]);
     await (await this.mustPeer(input.childId, 'The node', input.childAddress)).setParent(input.childId, issued.value, input.newNodeAddress);
-    await parent.adjustChildCount(parentId, -1);                    // the parent gave up the child; last, so a failure leaves it high
+    await parent.removeChild(parentId, input.childId);              // the parent gave up the child; last, so a failure leaves one too many
     return { id: issued.value, parentId };
   }
 
@@ -140,8 +155,8 @@ export class Conversations {
    * issue the new node's ID, so another node issues it: the one named, or the one with the shortest basis
    * among the top node itself and the nodes offered in `alsoConsider`. A shorter basis keeps the new ID short,
    * and any counter gives a unique value, so the choice of issuer never affects uniqueness.
-   * The value is the issuer's basis plus its next number, and is not the issuer's child, so its count is unchanged.
-   * If a later step fails the value is simply left unused, or the new node is left counting a child it does not have.
+   * The value is the issuer's basis plus its next number, and is not the issuer's child, so its list is unchanged.
+   * The new node lists the top node as its child before the top node points to it.
    */
   async addParentAbove(input: { nodeId: string; nodeAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string; issuerId?: string; issuerAddress?: string; alsoConsider?: Array<{ id: string; basis: string; address?: string }> }) {
     const top = await this.describeNode(input.nodeId, input.nodeAddress);
@@ -154,27 +169,24 @@ export class Conversations {
       : candidates.reduce((best, candidate) => (segments(candidate.basis) < segments(best.basis) || (segments(candidate.basis) === segments(best.basis) && candidate.basis.length < best.basis.length) ? candidate : best));
     const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
     await input.newNodePeer.accept({ id: fresh.value, type: input.type });
-    await input.newNodePeer.adjustChildCount(fresh.value, 1);       // counted before the pointer moves, so a failure leaves it high
+    await input.newNodePeer.addChildren(fresh.value, [{ childId: input.nodeId, type: top.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
     await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, fresh.value, input.newNodeAddress);
     return { id: fresh.value, childId: input.nodeId, issuerId: issuer.id };
   }
 
   /**
    * Records that a node was lost and names the node that replaced it. The replacement already exists: it was
-   * created like any other node, with a new ID that is its new basis. This adds the lost node's children to
-   * the replacement's count, records the lost ID as retired on the replacement's Core with its pointer naming
-   * the replacement, and takes the lost node off its old parent's count.
+   * created like any other node, with a new ID that is its new basis. This marks the replacement's list of
+   * children as possibly incomplete, records the lost ID as retired on the replacement's Core with its pointer
+   * naming the replacement, and takes the lost node off its old parent's list.
    *
-   * Nobody holds a list of the lost node's children, so they are not contacted. Each one finds its parent
-   * retired when it next connects and follows the pointer to the replacement (see repairParent). For that the
-   * retired record must be at the address the children already hold.
-   *
-   * The child count is entered by a person, because the lost node's own record is gone. It must not be too low.
-   * Steps are ordered so a failure leaves a count too high: the replacement is counted up first, and the old
-   * parent is counted down last. If the old parent cannot be reached its count stays one too high.
+   * The lost node's own list is gone with it, so its children are not contacted. Each one finds its parent
+   * retired when it next connects, follows the pointer to the replacement and adds itself to the replacement's
+   * list (see repairParent). For that the retired record must be at the address the children already hold.
+   * Until an administrator says the list is complete, the replacement is never treated as childless.
+   * If the old parent cannot be reached, its list keeps the lost node, one entry too many.
    */
-  async replaceLost(input: { lostId: string; type: NodeType; replacementId: string; replacementAddress?: string; childCount: number; lostParentId?: string; lostParentAddress?: string }) {
-    if (!Number.isSafeInteger(input.childCount) || input.childCount < 0) throw new Error('childCount must be a whole number, zero or more');
+  async replaceLost(input: { lostId: string; type: NodeType; replacementId: string; replacementAddress?: string; lostParentId?: string; lostParentAddress?: string }) {
     if (input.replacementId === input.lostId) throw new Error('A lost node needs a different node as its replacement');
     if (input.lostParentId === input.lostId) throw new Error('A node cannot be its own parent');
     const replacement = await this.describeNode(input.replacementId, input.replacementAddress);
@@ -182,14 +194,14 @@ export class Conversations {
     if (replacement.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.replacementId}`);
     const holder = await this.mustPeer(input.replacementId, 'The replacement', input.replacementAddress);
     if (await holder.describe(input.lostId)) throw new Error(`Node ${input.lostId} is still recorded on the replacement's Core, so it is not lost. Use remove instead`);
-    if (input.childCount) await holder.adjustChildCount(input.replacementId, input.childCount);
+    await holder.setChildListComplete(input.replacementId, false);
     await holder.acceptRetired({ id: input.lostId, type: input.type, replacementId: input.replacementId, replacementAddress: input.replacementAddress });
-    let oldParentCountStale = false;
+    let oldParentListStale = false;
     if (input.lostParentId) {
       const parent = await this.peer(input.lostParentId, input.lostParentAddress);
-      if (parent) { try { await parent.adjustChildCount(input.lostParentId, -1); } catch { oldParentCountStale = true; } } else oldParentCountStale = true;
+      if (parent) { try { await parent.removeChild(input.lostParentId, input.lostId); } catch { oldParentListStale = true; } } else oldParentListStale = true;
     }
-    return { lostId: input.lostId, replacementId: input.replacementId, childCount: input.childCount, oldParentCountStale };
+    return { lostId: input.lostId, replacementId: input.replacementId, oldParentListStale };
   }
 
   /**
@@ -197,7 +209,7 @@ export class Conversations {
    * a cycle needs an operator to move a node under its own descendant, and walking up to prove otherwise
    * would let an offline machine block a legitimate move. If a cycle ever formed, walking up reports it.
    * If the old parent cannot be reached the move is refused, unless an administrator overrides, in which
-   * case the old parent's count stays too high until it returns.
+   * case the old parent's list keeps the node, one entry too many, until it returns.
    */
   async rehome(input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {
     if (input.newParentId === input.nodeId) throw new Error('A node cannot be its own parent');
@@ -207,42 +219,74 @@ export class Conversations {
     const newParent = await this.mustPeer(input.newParentId, 'The new parent', input.newParentAddress);
     const oldParent = node.parentId ? await this.peer(node.parentId, node.parentAddress) : undefined;
     if (node.parentId && !oldParent && !input.administratorOverride) throw new Error(`The old parent is not reachable: ${node.parentId}. An administrator can override.`);
-    await newParent.adjustChildCount(input.newParentId, 1);
+    await newParent.addChildren(input.newParentId, [{ childId: input.nodeId, type: node.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
     await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, input.newParentId, input.newParentAddress);
-    let oldParentCountStale = false;
+    let oldParentListStale = false;
     if (node.parentId) {
-      if (oldParent) { try { await oldParent.adjustChildCount(node.parentId, -1); } catch { oldParentCountStale = true; } } else oldParentCountStale = true;
+      if (oldParent) { try { await oldParent.removeChild(node.parentId, input.nodeId); } catch { oldParentListStale = true; } } else oldParentListStale = true;
     }
-    return { changed: true as const, oldParentCountStale };
+    return { changed: true as const, oldParentListStale };
   }
 
   /**
-   * Retires a node. Its child count moves to its parent, less the removed node itself. Its children's pointers
-   * are not rewritten: the retired node keeps its own pointer and each child follows it later (see repairParent).
-   * The top of an organization has no parent, so the caller must say which node takes its children.
+   * Retires a node. Its children go on its parent's list, and the node comes off it, in that order. Their
+   * pointers are not rewritten: the retired node keeps its own pointer and each child follows it later (see
+   * repairParent). If the node's list may be incomplete, so may the parent's be afterwards. The top of an
+   * organization has no parent, so the caller must say which node takes its children. A node is childless only
+   * when its list is empty and known to be complete.
    */
   async remove(input: { nodeId: string; nodeAddress?: string; childrenParentId?: string; childrenParentAddress?: string }) {
     const node = await this.describeNode(input.nodeId, input.nodeAddress);
     if (typeof node === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
     if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
     const nodePeer = await this.mustPeer(input.nodeId, 'The node', input.nodeAddress);
+    const children = relocate(await nodePeer.children(input.nodeId), input.nodeAddress);
+    const incomplete = node.childListIncomplete === true;
     if (node.parentId) {
       const parent = await this.mustPeer(node.parentId, 'The parent', node.parentAddress);
-      const retired = await nodePeer.retire(input.nodeId);
-      await parent.adjustChildCount(node.parentId, retired.childCount - 1);
-      return { parentId: node.parentId, childCount: retired.childCount };
+      const toParent = children.filter((child) => child.childId !== node.parentId);  // a node never lists itself
+      if (toParent.length) await parent.addChildren(node.parentId, toParent);
+      if (incomplete) await parent.setChildListComplete(node.parentId, false);
+      await nodePeer.retire(input.nodeId);
+      await parent.removeChild(node.parentId, input.nodeId);
+      return { parentId: node.parentId, childCount: children.length };
     }
-    if (node.childCount === 0) {
-      const retired = await nodePeer.retire(input.nodeId);
-      return { parentId: undefined, childCount: retired.childCount };
+    if (!children.length && !incomplete) {
+      await nodePeer.retire(input.nodeId);
+      return { parentId: undefined, childCount: 0 };
     }
-    if (!input.childrenParentId) throw new Error('This node has no parent. Name childrenParentId to say which node takes its children');
+    if (!input.childrenParentId) throw new Error(incomplete && !children.length ? 'This node has no parent and its list of children may be incomplete. Name childrenParentId to say which node takes any children it has' : 'This node has no parent. Name childrenParentId to say which node takes its children');
     if (input.childrenParentId === input.nodeId) throw new Error('Children cannot be given to the node being removed');
     const inheritor = await this.mustPeer(input.childrenParentId, 'The node taking the children', input.childrenParentAddress);
-    await inheritor.adjustChildCount(input.childrenParentId, node.childCount);
+    const toInheritor = children.filter((child) => child.childId !== input.childrenParentId);  // the heir may be one of the children; it never lists itself
+    if (toInheritor.length) await inheritor.addChildren(input.childrenParentId, toInheritor);
+    if (incomplete) await inheritor.setChildListComplete(input.childrenParentId, false);
     await nodePeer.setParent(input.nodeId, input.childrenParentId, input.childrenParentAddress); // so its children can follow the chain
-    const retired = await nodePeer.retire(input.nodeId);
-    return { parentId: input.childrenParentId, childCount: retired.childCount };
+    await nodePeer.retire(input.nodeId);
+    return { parentId: input.childrenParentId, childCount: children.length };
+  }
+
+  /**
+   * Checks a node's list against its children's own pointers. An entry is dropped only on the child's word: when
+   * the child answers and names a different parent, or says it is retired. A child that cannot be reached, or whose
+   * Core does not know it, keeps its entry.
+   */
+  async checkChildren(input: { nodeId: string; nodeAddress?: string }) {
+    const parent = await this.mustPeer(input.nodeId, 'The node', input.nodeAddress);
+    const kept: string[] = [], dropped: string[] = [], unreachable: string[] = [], unknown: string[] = [];
+    for (const child of await parent.children(input.nodeId)) {
+      const answer = await this.describeNode(child.childId, child.address ?? input.nodeAddress);
+      if (answer === 'UNREACHABLE') { unreachable.push(child.childId); continue; }
+      if (answer === 'UNKNOWN') { unknown.push(child.childId); continue; }
+      if (answer.parentId !== input.nodeId || answer.status === 'RETIRED') { await parent.removeChild(input.nodeId, child.childId); dropped.push(child.childId); continue; }
+      kept.push(child.childId);
+    }
+    return { kept, dropped, unreachable, unknown };
+  }
+
+  /** An administrator says whether a node's list of children is complete. */
+  async markChildList(input: { nodeId: string; nodeAddress?: string; complete: boolean }) {
+    return (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setChildListComplete(input.nodeId, input.complete);
   }
 
   /**
