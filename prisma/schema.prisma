@@ -167,11 +167,25 @@ model SemaLocalNode {
   parentAddress String?
   basis      String
   issued     BigInt   @default(0)
-  childCount Int      @default(0)
+  childListComplete Boolean @default(true)
   status     String   @default("ACTIVE")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   @@index([parentId])
   @@map("sema_local_nodes")
+}
+
+/// One direct child of a node held by this Core, as the parent believes it to be. The child's own pointer is the
+/// truth. A list may hold too many entries, never too few.
+model SemaLocalNodeChild {
+  parentId     String
+  childId      String
+  childType    String
+  childAddress String?
+  addedAt      DateTime @default(now())
+  lastSeenAt   DateTime?
+
+  @@id([parentId, childId])
+  @@map("sema_local_node_children")
 }

@@ -5,9 +5,8 @@ import { encodeBase56 } from '../identity/base56.js';
  * Every other node lives on another machine and is reached by asking its Core.
  *
  * A record holds an ID, a type, a parent pointer (the parent's permanent ID), a basis with the counter that
- * issues values from it, a count of direct children, and a status. Nothing else is stored.
- * Operations that involve several machines are conversations between Cores built from the
- * single-node operations below.
+ * issues values from it, a status, and a list of the node's direct children. Operations that involve several
+ * machines are conversations between Cores built from the single-node operations below.
  */
 /**
  * What a node is. Only the types Core's own rules treat differently are listed here:
@@ -20,6 +19,17 @@ export const NODE_TYPES = ['ORGANIZATION', 'GROUP', 'USER', 'MACHINE'] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 export const isNodeType = (value: unknown): value is NodeType => NODE_TYPES.includes(value as NodeType);
 
+/**
+ * One direct child, as its parent believes it to be. The child's own pointer is the truth: when the two
+ * disagree, the pointer wins. A list may hold too many entries, never too few.
+ */
+export interface ChildEntry {
+  childId: string;
+  type: NodeType;
+  /** Where to reach the child's Core. Left out means the same Core as the parent. */
+  address?: string;
+}
+
 export interface LocalNode {
   id: string;
   type: NodeType;
@@ -29,8 +39,11 @@ export interface LocalNode {
   basis: string;
   /** How many values have been issued from the current basis. Never goes backwards while the basis stands. */
   issued: bigint;
-  /** Number of direct children. A parent keeps no list of them. Errs high, never low. */
-  childCount: number;
+  /**
+   * False when the list of children may be missing some, as on a node that replaced a lost one. Such a node is
+   * never treated as childless until an administrator says its list is complete.
+   */
+  childListComplete: boolean;
   status: 'ACTIVE' | 'RETIRED';
 }
 
@@ -39,43 +52,84 @@ export interface LocalNodeStore {
   /** Every node held here. The table is small: one machine node plus the users placed on this machine. */
   list(): Promise<LocalNode[]>;
   insert(node: LocalNode): Promise<void>;
-  /** Reads a node, applies the change and writes it back as one step. A database store locks the row. */
-  mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T }): Promise<T>;
+  /**
+   * Reads a node, applies the change and writes it back as one step. A database store locks the row. A change
+   * may also add children, which are written in the same step, so an issued child is never left off the list.
+   */
+  mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T; addChildren?: ChildEntry[] }): Promise<T>;
+  children(id: string): Promise<ChildEntry[]>;
+  /** How many children each node held here has, by node ID. */
+  countChildren(): Promise<Map<string, number>>;
+  /** Adds children, or updates entries already there. Only an active node may gain children. */
+  addChildren(id: string, entries: ChildEntry[]): Promise<void>;
+  /** Takes one child off a node's list. Says whether it was there. */
+  removeChild(id: string, childId: string): Promise<boolean>;
 }
 
 export class InMemoryLocalNodeStore implements LocalNodeStore {
   readonly nodes = new Map<string, LocalNode>();
+  readonly lists = new Map<string, Map<string, ChildEntry>>();
   async get(id: string) { const node = this.nodes.get(id); return node ? { ...node } : undefined; }
   async list() { return [...this.nodes.values()].map((node) => ({ ...node })); }
   async insert(node: LocalNode) {
     if (this.nodes.has(node.id)) throw new Error(`Node already exists: ${node.id}`);
     this.nodes.set(node.id, { ...node });
+    this.lists.set(node.id, new Map());
   }
-  async mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T }) {
+  async mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T; addChildren?: ChildEntry[] }) {
     const current = this.nodes.get(id);
     if (!current) throw new Error(`Node does not exist on this Core: ${id}`);
-    const { node, result } = change({ ...current });
+    const { node, result, addChildren } = change({ ...current });
     this.nodes.set(id, { ...node });
+    for (const entry of addChildren ?? []) this.lists.get(id)!.set(entry.childId, { ...entry });
     return result;
+  }
+  async children(id: string) { return [...(this.lists.get(id)?.values() ?? [])].map((entry) => ({ ...entry })); }
+  async countChildren() { return new Map([...this.lists].map(([id, list]) => [id, list.size])); }
+  async addChildren(id: string, entries: ChildEntry[]) {
+    const node = this.nodes.get(id);
+    if (!node) throw new Error(`Node does not exist on this Core: ${id}`);
+    if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
+    for (const entry of entries) this.lists.get(id)!.set(entry.childId, { ...entry });
+  }
+  async removeChild(id: string, childId: string) {
+    if (!this.nodes.has(id)) throw new Error(`Node does not exist on this Core: ${id}`);
+    return this.lists.get(id)!.delete(childId);
   }
 }
 
-/** What any other Core may learn about a node by asking. */
-export type NodeDescription = Pick<LocalNode, 'id' | 'type' | 'parentId' | 'parentAddress' | 'basis' | 'childCount' | 'status'>;
+/** What any other Core may learn about a node by asking. The child count is the length of its list. */
+export interface NodeDescription {
+  id: string;
+  type: NodeType;
+  parentId?: string;
+  parentAddress?: string;
+  basis: string;
+  childCount: number;
+  /** Present, and true, only when the list of children may be missing some. */
+  childListIncomplete?: true;
+  status: 'ACTIVE' | 'RETIRED';
+}
 
 const segments = (basis: string) => basis.split('-').length;
+const validId = (id: string) => Boolean(id) && id.split('-').every(Boolean);
+const entry = (child: { childId: string; type: NodeType; address?: string }): ChildEntry => {
+  if (!validId(child.childId)) throw new Error('A child ID must be hyphen-separated non-empty segments');
+  if (!isNodeType(child.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+  return { childId: child.childId, type: child.type, ...(child.address ? { address: child.address } : {}) };
+};
 
 export class LocalNodes {
   constructor(private readonly store: LocalNodeStore) {}
 
   /** Records a node on this machine from an ID that another Core, or the central authority, issued. */
   async accept(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }) {
-    if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
+    if (!validId(input.id)) throw new Error('A node ID must be hyphen-separated non-empty segments');
     if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
     if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
-    const node: LocalNode = { id: input.id, type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'ACTIVE' };
+    const node: LocalNode = { id: input.id, type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'ACTIVE' };
     await this.store.insert(node);
-    return this.describeNode(node);
+    return this.describeNode(node, 0);
   }
 
   /**
@@ -85,15 +139,18 @@ export class LocalNodes {
    * because a node this Core still holds is not lost.
    */
   async acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) {
-    if (!input.id || input.id.split('-').some((part) => !part)) throw new Error('A node ID must be hyphen-separated non-empty segments');
+    if (!validId(input.id)) throw new Error('A node ID must be hyphen-separated non-empty segments');
     if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
     if (!input.replacementId || input.replacementId === input.id) throw new Error('A lost node needs a different node as its replacement');
-    const node: LocalNode = { id: input.id, type: input.type, parentId: input.replacementId, ...(input.replacementAddress ? { parentAddress: input.replacementAddress } : {}), basis: input.id, issued: BigInt(0), childCount: 0, status: 'RETIRED' };
+    const node: LocalNode = { id: input.id, type: input.type, parentId: input.replacementId, ...(input.replacementAddress ? { parentAddress: input.replacementAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'RETIRED' };
     await this.store.insert(node);
-    return this.describeNode(node);
+    return this.describeNode(node, 0);
   }
 
-  async list() { return (await this.store.list()).map((node) => this.describeNode(node)); }
+  async list() {
+    const counts = await this.store.countChildren();
+    return (await this.store.list()).map((node) => this.describeNode(node, counts.get(node.id) ?? 0));
+  }
 
   /**
    * The nodes held here as this machine's own administrator sees them: each with the next ID it would issue,
@@ -101,24 +158,37 @@ export class LocalNodes {
    * The value is a reading, not a promise: on the machine's own node it moves with every ID Core issues.
    */
   async listWithNextId() {
-    return (await this.store.list()).map((node) => ({ ...this.describeNode(node), ...(node.status === 'ACTIVE' ? { nextId: `${node.basis}-${encodeBase56(node.issued + BigInt(1))}` } : {}) }));
+    const counts = await this.store.countChildren();
+    return (await this.store.list()).map((node) => ({ ...this.describeNode(node, counts.get(node.id) ?? 0), ...(node.status === 'ACTIVE' ? { nextId: `${node.basis}-${encodeBase56(node.issued + BigInt(1))}` } : {}) }));
   }
 
   async describe(id: string) {
     const node = await this.store.get(id);
-    return node ? this.describeNode(node) : undefined;
+    return node ? this.describeNode(node, (await this.store.children(id)).length) : undefined;
   }
 
-  /** Issues the ID for a new child from this node's basis and counts the child. The child's own Core then accepts it. */
-  issueChildId(id: string) {
-    return this.store.mutate(id, (node) => {
+  /** The node's direct children, as it believes them to be. */
+  async children(id: string) {
+    if (!(await this.store.get(id))) throw new Error(`Node does not exist on this Core: ${id}`);
+    return this.store.children(id);
+  }
+
+  /**
+   * Issues the ID for a new child from this node's basis and puts it on the list in the same step, before the
+   * child's own Core has accepted it. If the child is never recorded, the entry is one too many, never one too few.
+   */
+  async issueChildId(id: string, child: { type: NodeType; address?: string }) {
+    if (!isNodeType(child.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+    const value = await this.store.mutate(id, (node) => {
       this.requireActive(node);
       const issued = node.issued + BigInt(1);
-      return { node: { ...node, issued, childCount: node.childCount + 1 }, result: { value: `${node.basis}-${encodeBase56(issued)}`, childCount: node.childCount + 1 } };
+      const childId = `${node.basis}-${encodeBase56(issued)}`;
+      return { node: { ...node, issued }, result: childId, addChildren: [entry({ childId, type: child.type, address: child.address })] };
     });
+    return { value, childCount: (await this.store.children(id)).length };
   }
 
-  /** Issues a fresh value that another node will adopt as its basis. It is not a child, so the count is unchanged. */
+  /** Issues a fresh value that another node will adopt as its basis. It is not a child, so the list is unchanged. */
   issueBasis(id: string) {
     return this.store.mutate(id, (node) => {
       this.requireActive(node);
@@ -127,14 +197,15 @@ export class LocalNodes {
     });
   }
 
-  setParent(id: string, parentId: string, parentAddress?: string) {
-    return this.store.mutate(id, (node) => {
+  async setParent(id: string, parentId: string, parentAddress?: string) {
+    const moved = await this.store.mutate(id, (node) => {
       this.requireActive(node);
       if (parentId === id) throw new Error('A node cannot be its own parent');
       const { parentAddress: _old, ...rest } = node;
-      const moved: LocalNode = { ...rest, parentId, ...(parentAddress ? { parentAddress } : {}) };
-      return { node: moved, result: this.describeNode(moved) };
+      const next: LocalNode = { ...rest, parentId, ...(parentAddress ? { parentAddress } : {}) };
+      return { node: next, result: next };
     });
+    return this.describeNode(moved, (await this.store.children(id)).length);
   }
 
   /** Adopts a shorter basis issued by a reachable ancestor. Only the basis and its counter change. */
@@ -147,27 +218,40 @@ export class LocalNodes {
     });
   }
 
-  /** Moves the child count by a signed amount. It can never go below zero. */
-  adjustChildCount(id: string, delta: number) {
-    if (!Number.isSafeInteger(delta)) throw new Error('delta must be a whole number');
-    return this.store.mutate(id, (node) => {
-      const childCount = node.childCount + delta;
-      if (childCount < 0) throw new Error('A child count cannot go below zero');
-      return { node: { ...node, childCount }, result: { childCount } };
-    });
+  /** Adds children to a node's list, or updates entries already there. Only an active node gains children. */
+  async addChildren(id: string, children: Array<{ childId: string; type: NodeType; address?: string }>) {
+    const entries = children.map(entry);
+    if (entries.some((child) => child.childId === id)) throw new Error('A node cannot be its own child');
+    await this.store.addChildren(id, entries);
+    return { childCount: (await this.store.children(id)).length };
+  }
+
+  /** Takes one child off a node's list. */
+  async removeChild(id: string, childId: string) {
+    const removed = await this.store.removeChild(id, childId);
+    return { removed, childCount: (await this.store.children(id)).length };
+  }
+
+  /** Says whether the node's list of children is known to be complete. */
+  setChildListComplete(id: string, complete: boolean) {
+    if (typeof complete !== 'boolean') throw new Error('complete must be true or false');
+    return this.store.mutate(id, (node) => ({ node: { ...node, childListComplete: complete }, result: { childListComplete: complete } }));
   }
 
   /**
-   * Retires a node. The record and its own pointer stay, so a child that was offline can follow the
-   * chain upward. The child count is returned and cleared so the caller can add it to the parent's.
+   * Retires a node. The record, its own pointer and its list of children stay as they were, so a child that
+   * was offline can follow the chain upward. The list is returned so the caller can give the children to the parent.
    */
-  retire(id: string) {
-    return this.store.mutate(id, (node) => {
-      this.requireActive(node);
-      return { node: { ...node, status: 'RETIRED' as const, childCount: 0 }, result: { parentId: node.parentId, ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), childCount: node.childCount } };
+  async retire(id: string) {
+    const node = await this.store.mutate(id, (current) => {
+      this.requireActive(current);
+      return { node: { ...current, status: 'RETIRED' as const }, result: current };
     });
+    return { ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), children: await this.store.children(id), childListComplete: node.childListComplete };
   }
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
-  private describeNode(node: LocalNode): NodeDescription { return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount: node.childCount, status: node.status }; }
+  private describeNode(node: LocalNode, childCount: number): NodeDescription {
+    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), status: node.status };
+  }
 }

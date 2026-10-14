@@ -23,14 +23,27 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/install-machine` `{parentId, parentAddress?, newCoreAddress, joinCode}` | Installs a new machine: issues a node ID and gives it to a Core that has no identity yet. See below. |
 | `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/add-parent-above` `{nodeId, nodeAddress?, type, newNodeAddress?, issuerId?, issuerAddress?}` | New parent above a node that has none, so the tree grows from the ground up. Needs `core.authority.add-top`, not `core.topology.write`. See below. |
-| `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, childCount, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
+| `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
-| `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; children follow the pointer later. |
+| `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; its children go on its parent's list, and each follows the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from the highest reachable ancestor. |
-| `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor. |
+| `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor, adding it to that ancestor's list first. |
+| `POST /v1/core/topology/check-children` `{nodeId, nodeAddress?}` | Check a node's list against its children's own pointers. See below. |
+| `POST /v1/core/topology/mark-child-list` `{nodeId, nodeAddress?, complete}` | An administrator says whether a node's list of children is complete. |
 
 An address left out means "this Core". Each operation is audited by the Core that ran it.
 
+## The list of direct children
+
+Each node keeps a list of its direct children. It replaced the child count, and the count a node reports is the length of its list. An entry holds the child's ID, its type, and the address of its Core (left out when the child is on the same Core as the parent).
+
+- **The child's own pointer is the truth.** The list is what the parent believes.
+- **A list may hold too many entries, never too few.** A child is added to its new parent before it is taken off its old one. Issuing a child's ID puts it on the parent's list in the same step, before the child's own Core has accepted it.
+- **An entry is dropped only on the child's word.** `check-children` asks each child; it drops an entry when the child names a different parent or says it is retired. A child that cannot be reached, or whose Core does not know it, keeps its entry.
+- **A list may be marked as possibly incomplete,** as on a node that replaced a lost one. A node is childless only when its list is empty and known to be complete. Removing such a node, or a node whose list it inherits, passes the mark on.
+- **A retired node keeps its list as it was,** as a record. It gains no new children.
+- Nodes recorded before the list existed had only a count. Any that had children are marked as possibly incomplete by the migration.
+- Not built yet: check-ins. The table has a column for when a child last checked in, which is empty until they exist.
 ## Node type
 
 Every node has a `type`. Core lists only the types its own rules treat differently:
@@ -64,10 +77,10 @@ A Core's database says which node it is. An ID typed into its settings never cre
 
 1. On the new machine, set `SEMA_CORE_JOIN_CODE` in Core's `.env` to a random value, and start Core. It waits.
 2. On a Core already in the system, call `install-machine` with the parent node, the new machine's address and the join code.
-3. The parent's Core issues the ID from its counter and counts the child, as for any node, and sends the ID, the parent pointer and the join code to the new Core.
+3. The parent's Core issues the ID from its counter and puts the child on its list, as for any node, and sends the ID, the parent pointer and the join code to the new Core.
 4. The new Core checks the code, records its identity and its machine node together, and carries on starting as a normal Core. It never joins a second time.
 
-Nobody types an ID. If the new Core refuses, the parent takes the child back off its count and the number is left unused.
+Nobody types an ID. If the new Core refuses, the number is left unused, and the parent takes the child off its list once the new Core says it holds no node.
 
 The join code proves the request comes from the person who set that machine up. It is never recorded. It is a stopgap, like the shared application secrets, until machines have key pairs. The new Core must be able to reach its parent afterwards, so the Core that installs it needs `SEMA_CORE_ADDRESS` set.
 
@@ -109,7 +122,7 @@ A grant is refused while the Core still has values left in a block it holds, and
 
 ## Adding a parent above a top node
 
-A top node has no parent to issue the new node's ID, so another node issues it: its basis plus the next number from its counter. The new node is not the issuer's child, so the issuer's count does not change. The new node has no parent and a child count of 1, and the old top points to it.
+A top node has no parent to issue the new node's ID, so another node issues it: its basis plus the next number from its counter. The new node is not the issuer's child, so the issuer's list does not change. The new node has no parent and lists the old top as its one child, and the old top points to it.
 
 The issuer is the node named in `issuerId`. When none is named, it is the node with the shortest basis among the top node itself and the active nodes held by the Core that runs the request. A shorter basis keeps the new ID short; any counter gives a unique value, so the choice never affects uniqueness. On the first machine that is node `3`, so every top is `3` plus one number.
 
@@ -120,13 +133,13 @@ This is a change at the top of the tree. It has its own permission, `core.author
 A node whose records are gone (a machine rebuilt, a database lost) is replaced in two steps.
 
 1. Create the replacement like any other node. It gets a new ID, and that ID is its new basis.
-2. Record the loss with `replace-lost`, naming the lost ID, its type, the replacement, the lost node's old parent if it had one, and a child count.
+2. Record the loss with `replace-lost`, naming the lost ID, its type, the replacement, and the lost node's old parent if it had one.
 
-`replace-lost` adds the child count to the replacement, records the lost ID as retired on the replacement's Core with its pointer naming the replacement, and takes the lost node off its old parent's count. The old ID is never issued again and the old basis is closed: a retired node issues nothing.
+`replace-lost` marks the replacement's list of children as possibly incomplete, records the lost ID as retired on the replacement's Core with its pointer naming the replacement, and takes the lost node off its old parent's list. The old ID is never issued again and the old basis is closed: a retired node issues nothing.
 
-Nobody holds a list of the lost node's children, so none are contacted. Each child finds its parent retired when it next connects and follows the pointer to the replacement (`repair-parent`). The retired record must therefore be at the address the children already hold, which is why the replacement should live on the Core at the lost node's address.
+The lost node's list went with it, so its children are not contacted. Each child finds its parent retired when it next connects, follows the pointer to the replacement and adds itself to the replacement's list (`repair-parent`). The retired record must therefore be at the address the children already hold, which is why the replacement should live on the Core at the lost node's address.
 
-The child count is entered by a person, because the lost node's own record is gone. It must be at least as high as the real number: a database backup gives the number as of the backup date, plus anything added since. Too high only means the replacement never looks childless. If the old parent cannot be reached, its count stays one too high.
+Until an administrator says the replacement's list is complete (`mark-child-list`), the replacement is never treated as childless. If the old parent cannot be reached, its list keeps the lost node, one entry too many.
 
 It refuses a lost ID the replacement's Core still holds (that node is not lost: use `remove`), and a replacement that is retired, unreachable or the same node.
 

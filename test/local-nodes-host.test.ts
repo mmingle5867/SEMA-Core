@@ -22,9 +22,11 @@ assert.equal((await post('accept', { id: '3-8', type: 'PRINTER' })).status, 400)
 assert.equal(await describe('3-8'), null);
 assert.equal(await describe('3-4'), null, 'a node on another machine is simply not here');
 
-const child = await post('issue-child', { nodeId: '3-3' });
+assert.equal((await post('issue-child', { nodeId: '3-3' })).status, 400, 'a child cannot be issued without saying what it is');
+const child = await post('issue-child', { nodeId: '3-3', type: 'USER', address: 'http://elsewhere.example' });
 assert.equal(child.status, 201);
 assert.deepEqual(child.body, { value: '3-3-3', childCount: 1 });
+assert.deepEqual(await (await fetch(`${base}/children?id=3-3`, { headers: admin })).json(), [{ childId: '3-3-3', type: 'USER', address: 'http://elsewhere.example' }]);
 const basis = await post('issue-basis', { nodeId: '3-3' });
 assert.equal(basis.body.value, '3-3-4');
 assert.equal((await describe('3-3'))!.childCount, 1, 'issuing a basis is not adding a child');
@@ -32,14 +34,22 @@ assert.equal((await describe('3-3'))!.childCount, 1, 'issuing a basis is not add
 assert.equal((await post('accept', { id: '3-3-9', type: 'USER', parentId: '3-3' })).status, 201);
 assert.equal((await describe('3-3-9'))!.type, 'USER');
 assert.equal((await post('set-parent', { nodeId: '3-3-9', parentId: '3' })).body.parentId, '3');
-assert.equal((await post('child-count', { nodeId: '3-3', delta: -1 })).body.childCount, 0);
-assert.equal((await post('child-count', { nodeId: '3-3', delta: -1 })).status, 500, 'never below zero');
+assert.deepEqual((await post('add-children', { nodeId: '3', children: [] })).status, 500, 'only a node held here gains children');
+assert.deepEqual((await post('add-children', { nodeId: '3-3', children: [{ childId: '3-3-9', type: 'USER' }] })).body, { childCount: 2 });
+assert.equal((await post('add-children', { nodeId: '3-3', children: [{ childId: '3-3-7', type: 'PRINTER' }] })).status, 400);
+assert.equal((await post('add-children', { nodeId: '3-3', children: 'nope' })).status, 400);
+assert.deepEqual((await post('remove-child', { nodeId: '3-3', childId: '3-3-3' })).body, { removed: true, childCount: 1 });
+assert.deepEqual((await post('remove-child', { nodeId: '3-3', childId: '3-3-3' })).body, { removed: false, childCount: 1 });
+assert.deepEqual((await post('child-list-complete', { nodeId: '3-3', complete: false })).body, { childListComplete: false });
+assert.equal((await describe('3-3'))!.childListIncomplete, true);
+assert.equal((await post('child-list-complete', { nodeId: '3-3', complete: 'yes' })).status, 400);
+await post('child-list-complete', { nodeId: '3-3', complete: true });
 assert.equal((await post('set-basis', { nodeId: '3-3-9', basis: '3-3-9' })).status, 500, 'a roll-up must shorten');
 assert.equal((await post('retire', { nodeId: '3-3-9' })).body.parentId, '3');
 assert.equal((await describe('3-3-9'))!.status, 'RETIRED');
 
 // Only an administrator may change nodes, and every change is audited.
-assert.equal((await post('issue-child', { nodeId: '3-3' }, { 'x-sema-actor-id': 'someone', 'content-type': 'application/json' })).status, 403);
+assert.equal((await post('issue-child', { nodeId: '3-3', type: 'USER' }, { 'x-sema-actor-id': 'someone', 'content-type': 'application/json' })).status, 403);
 assert.ok((await host.statistics({ actorId: 'admin' })).auditEntries >= 7);
 
 // A Core without local nodes says so plainly.
