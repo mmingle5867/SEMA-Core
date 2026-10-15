@@ -45,6 +45,17 @@ export interface Ancestry {
 const segments = (basis: string) => basis.split('-').length;
 
 /**
+ * The part of a walk up that is inside the node's own organization: everything up to and including its nearest
+ * ORGANIZATION ancestor. An organization node is its own organization, so nothing above it is inside. When the walk
+ * found no organization (none above, or it stopped at an unreachable node first), everything it reached is inside.
+ */
+const insideOrganization = (node: NodeDescription, chain: ReachedNode[]) => {
+  if (node.type === 'ORGANIZATION') return [];
+  const at = chain.findIndex((ancestor) => ancestor.type === 'ORGANIZATION');
+  return at < 0 ? chain : chain.slice(0, at + 1);
+};
+
+/**
  * An entry on one node's list leaves out the address when the child is on the same Core as that node. When the
  * entries move to a node on another Core, the address they were relative to is written in.
  */
@@ -312,20 +323,26 @@ export class Conversations {
   }
 
   /**
-   * Shortens the node's basis. The issuer is a reachable ancestor, by default the one with the shortest basis,
-   * which is the highest the walk reached: one level below the highest reachable node. Nodes above a break in
-   * the chain are never used, so a number is never taken from an unreachable parent.
+   * Shortens the node's basis. The issuer is a reachable ancestor inside the node's own organization: its nearest
+   * ORGANIZATION ancestor or a node between that and the node. By default it is the one with the shortest basis,
+   * the highest the walk reached inside the organization. Nodes above a break in the chain are never used, so a
+   * number is never taken from an unreachable parent. Going outside the organization is allowed only when the
+   * node's basis has more segments than that organization's segment limit; no limits exist yet, so for now a
+   * roll-up never leaves the organization. An organization node has nothing above it inside itself, so it cannot
+   * roll up until then. A node with no organization above it may use any reachable ancestor.
    */
   async rollUp(input: { nodeId: string; nodeAddress?: string; issuerId?: string }) {
     const node = await this.describeNode(input.nodeId, input.nodeAddress);
     if (typeof node === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
     const { chain } = await this.walkUp(input.nodeId, input.nodeAddress);
-    const candidates = chain.filter((ancestor) => ancestor.status === 'ACTIVE');
-    if (!candidates.length) throw new Error('No reachable ancestor can issue a new basis');
+    const candidates = insideOrganization(node, chain).filter((ancestor) => ancestor.status === 'ACTIVE');
+    if (!candidates.length) throw new Error(node.type === 'ORGANIZATION'
+      ? 'An organization node has no ancestor inside its own organization to issue a new basis. Going to a parent organization needs a segment limit that the node is over, and none applies'
+      : 'No reachable ancestor inside the node\'s organization can issue a new basis');
     const issuer = input.issuerId
       ? candidates.find((ancestor) => ancestor.id === input.issuerId)
       : candidates.reduce((best, ancestor) => (segments(ancestor.basis) < segments(best.basis) ? ancestor : best));
-    if (!issuer) throw new Error('The issuer must be a reachable ancestor of the node');
+    if (!issuer) throw new Error('The issuer must be a reachable ancestor inside the node\'s own organization');
     if (segments(issuer.basis) + 1 >= segments(node.basis)) throw new Error('A roll-up must make the basis shorter');
     const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
     return { issuerId: issuer.id, ...(await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setBasis(input.nodeId, fresh.value)) };

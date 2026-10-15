@@ -423,7 +423,7 @@ export class SemaCoreHost {
     const childrenParentId = input.childrenParentId ? this.text(input.childrenParentId, 'childrenParentId') : undefined;
     return this.conversation(context, 'core.topology.node-removed', [nodeId, ...(childrenParentId ? [childrenParentId] : [])], (talk) => talk.remove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), childrenParentId, childrenParentAddress: childrenParentId ? this.address(input.childrenParentAddress, 'childrenParentAddress') : undefined }), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount }));
   }
-  /** Shortens a node's basis using the highest reachable ancestor, or the named one. */
+  /** Shortens a node's basis using an ancestor inside its own organization: the highest reachable one, or the named one. */
   topologyRollUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; issuerId?: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId');
     return this.conversation(context, 'core.topology.node-rolled-up', [nodeId], (talk) => talk.rollUp({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), issuerId: input.issuerId ? this.text(input.issuerId, 'issuerId') : undefined }), (result) => ({ issuerId: result.issuerId, previousBasis: result.previousBasis, basis: result.basis }));
