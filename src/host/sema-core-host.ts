@@ -5,7 +5,7 @@ import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, J
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
-import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
+import { Conversations, limitNotes, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 import { encodeBase56 } from '../identity/base56.js';
 import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './install-code.js';
 import { FIRST_NODE_ID } from './join.js';
@@ -473,16 +473,18 @@ export class SemaCoreHost {
         const organization = node.type === 'ORGANIZATION' ? await this.localNodes.describe(node.id) : (await talk.walkUp(node.id, address)).chain.find((ancestor) => ancestor.type === 'ORGANIZATION');
         const limits = organization?.keyLimits;
         const length = node.type === 'MACHINE' ? (limits?.maxLastSegmentLength ?? limits?.maxSegmentLength) : limits?.maxSegmentLength;
-        if (!length) { nodes.push({ nodeId: node.id, basis: node.basis, issued, state: 'NO_LIMIT' }); continue; }
+        const notes = limitNotes(node.basis, limits);
+        if (!length) { nodes.push({ nodeId: node.id, basis: node.basis, issued, state: 'NO_LIMIT', ...(notes.length ? { notes } : {}) }); continue; }
         const maxValue = BigInt(56) ** BigInt(length) - BigInt(1);
         const early = maxValue - (maxValue / BigInt(10) > BigInt(0) ? maxValue / BigInt(10) : BigInt(1));
-        const base = { nodeId: node.id, basis: node.basis, issued, limitLength: length, maxValue: maxValue.toString() };
+        const base = { nodeId: node.id, basis: node.basis, issued, limitLength: length, maxValue: maxValue.toString(), ...(notes.length ? { notes } : {}) };
         if (node.nextBasis) { nodes.push({ ...base, state: 'READY', nextBasis: node.nextBasis, switchAt: node.switchAt?.toString() }); continue; }
         if (node.issued < early) { nodes.push({ ...base, state: 'OK' }); continue; }
         try {
           const prepared = await talk.prepareNextBasis({ nodeId: node.id, nodeAddress: address, switchAt: maxValue });
           await this.core.recordAudit({ action: 'core.topology.next-basis-prepared', actorId, subjectIds: [node.id, ...(prepared.issuerId ? [prepared.issuerId] : [])], evidence: { nextBasis: prepared.nextBasis ?? null, switchAt: prepared.switchAt ?? null } });
-          nodes.push({ ...base, state: 'READY', nextBasis: prepared.nextBasis, switchAt: prepared.switchAt });
+          const all = [...notes, ...('notes' in prepared && prepared.notes ? prepared.notes : []).map((note: string) => 'The ready basis: ' + note)];
+          nodes.push({ ...base, state: 'READY', nextBasis: prepared.nextBasis, switchAt: prepared.switchAt, ...(all.length ? { notes: all } : {}) });
         } catch (error) {
           nodes.push({ ...base, state: node.issued > maxValue ? 'OVER_LIMIT' : 'NEEDS_BASIS', reason: error instanceof Error ? error.message : 'A ready basis could not be fetched' });
         }

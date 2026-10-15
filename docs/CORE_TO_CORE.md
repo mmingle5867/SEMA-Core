@@ -179,6 +179,8 @@ An organization may set optional limits on the IDs issued inside it, on its orga
 What uses them today:
 
 - **A roll-up may leave the organization** only when the node's basis has more segments than `maxSegments`. Then any reachable ancestor may issue, a parent organization or above. An organization node uses its own limit, so it can roll up only when over it.
+- **Choosing the issuer.** A roll-up, or a ready basis, gets its new basis from an ancestor: that ancestor's basis plus one value from its counter. The ancestors that may issue are ranked by what they would give: first one whose basis leaves room within the organization's limits (no more than `maxSegments` segments after adding one, and no segment longer than `maxSegmentLength`), then the fewest segments, then the fewest characters. A roll-up only considers ancestors that make the basis shorter. A named issuer is used as given.
+- **What the organization cannot govern.** Segments that came from above were issued under a parent's rules. When no ancestor fits, the best one still issues, as long as a roll-up makes the basis shorter; the result carries `notes` saying which inherited segment breaks the limit. The renewal check reports the same notes for each node, as information, not as a warning: nothing inside the organization can fix them. Everything the node issues from its new basis follows the organization's limits again.
 
 - **The length limits decide when a node renews its counter.** A machine node uses `maxLastSegmentLength` (it issues ordinary IDs), falling back to `maxSegmentLength`; every other node uses `maxSegmentLength`. A limit of L characters lets a counter reach 56^L − 1.
 

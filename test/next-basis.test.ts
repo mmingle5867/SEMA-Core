@@ -68,12 +68,17 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   await nodes.setKeyLimits('8', { maxSegmentLength: 1 });
   for (let i = 0; i < 56; i += 1) await nodes.issueChildId('8', { type: 'USER' });
   await nodes.accept({ id: '9', type: 'ORGANIZATION' });   // no limits at all
+  await nodes.accept({ id: 'ab', type: 'ORGANIZATION' });  // its own ID has a 2-character segment, over its limit of 1
+  await nodes.setKeyLimits('ab', { maxSegmentLength: 1 });
 
   assert.equal((await call('GET', '/v1/core/topology/key-limit-status')).payload, null, 'no report before the first run');
   let report = (await call('POST', '/v1/core/topology/key-limit-check')).payload;
   const state = (id: string) => report.nodes.find((node: any) => node.nodeId === id);
   assert.equal(state('7-3').state, 'OK', 'at 49 of 55 it is still below nine tenths');
   assert.equal(state('9').state, 'NO_LIMIT');
+  assert.equal(state('ab').state, 'OK', 'a note is information, not a warning');
+  assert.ok(state('ab').notes[0].includes("a segment (ab) longer than the organization's limit of 1 characters"));
+  assert.equal(state('7-3').notes, undefined, 'nothing to note when the basis fits');
   assert.equal(state('8').state, 'OVER_LIMIT', 'past its limit, with no ancestor inside its organization to issue');
   assert.match(state('8').reason, /No reachable ancestor/);
   assert.equal((await nodes.issueChildId('8', { type: 'USER' })).value, '8-33', 'it keeps issuing (value 57, two characters): a limit is a preference');

@@ -81,4 +81,34 @@ assert.deepEqual(await talk.rollUp({ nodeId: sub }), { issuerId: '5', previousBa
 assert.equal((await nodes.setKeyLimits(division, null)).keyLimits, undefined);
 assert.equal((await nodes.setKeyLimits(sub, {})).keyLimits, undefined);
 
+// Going outside the organization, the issuer is chosen by what it would give: one that leaves the new basis within
+// the organization's limits comes first, even over an ancestor with fewer segments whose own segments are too long.
+{
+  const tree = new LocalNodes(new InMemoryLocalNodeStore());
+  const on = new Conversations({ find: async () => tree });
+  const make = async (parentId: string, type: NodeType) => (await on.createNode({ parentId, type, newNodePeer: tree })).id;
+  await tree.accept({ id: 'aaaaaa', type: 'ORGANIZATION' });           // a parent organization whose ID has a 6-character segment
+  const middle = await make('aaaaaa', 'ORGANIZATION');                 // aaaaaa-3
+  const ours = await make(middle, 'ORGANIZATION');                     // aaaaaa-3-3
+  await tree.setBasis(ours, '5-4');                                    // it rolled up long ago, to a short basis
+  await tree.setKeyLimits(ours, { maxSegments: 5, maxSegmentLength: 4 });
+  let at = ours;
+  for (let i = 0; i < 4; i += 1) at = await make(at, 'GROUP');         // 5-4-3, 5-4-3-3, 5-4-3-3-3, 5-4-3-3-3-3
+  assert.equal(at, '5-4-3-3-3-3');
+  const chosen = await on.rollUp({ nodeId: at });
+  assert.deepEqual(chosen, { issuerId: ours, previousBasis: '5-4-3-3-3-3', basis: '5-4-4' }, 'the organization issues: aaaaaa has fewer segments but its segment is too long, and nothing needs noting');
+
+  // When no ancestor fits, the one with the fewest segments still issues, provided the basis gets shorter, and the
+  // result says plainly which inherited segment breaks the limit. It is a note, never a refusal.
+  await tree.setKeyLimits(ours, { maxSegments: 5, maxSegmentLength: 4 });
+  const other = await make('aaaaaa', 'ORGANIZATION');                  // aaaaaa-4, still the long segment
+  await tree.setKeyLimits(other, { maxSegments: 3, maxSegmentLength: 4 });
+  let low = other;
+  for (let i = 0; i < 3; i += 1) low = await make(low, 'GROUP');       // aaaaaa-4-3-3-3, five segments
+  const noted = await on.rollUp({ nodeId: low });
+  assert.equal(noted.issuerId, 'aaaaaa', 'no ancestor fits, so the fewest segments wins');
+  assert.equal(noted.basis, 'aaaaaa-5');
+  assert.deepEqual(noted.notes, ['The basis aaaaaa-5 has a segment (aaaaaa) longer than the organization\'s limit of 4 characters, issued under the rules of the node that issued it']);
+}
+
 console.log('Roll-up test passed.');
