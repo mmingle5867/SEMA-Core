@@ -2,7 +2,7 @@ import type { SemaCore } from '../core/sema-core.js';
 import { SEMA_CORE_VERSION } from '../version.js';
 import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
-import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
+import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
 import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
@@ -184,6 +184,9 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/accept-retired', purpose: 'Record the old ID of a lost node as retired, pointing at its replacement. Used between Cores during replace-lost; needs core.authority.replace-lost.' },
         { method: 'POST', path: '/v1/core/topology/key-limits', purpose: 'Set, change or clear an organization\'s optional key limits: maxSegments, maxSegmentLength, maxLastSegmentLength. A roll-up may leave the organization only when the basis has more segments than maxSegments.' },
         { method: 'POST', path: '/v1/core/topology/nodes/key-limits', purpose: 'Set, change or clear the key limits on an organization node held here. Used between Cores during key-limits.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
+        { method: 'GET', path: '/v1/core/topology/key-limit-status', purpose: 'The last report of the check that fetches a ready basis before a node reaches its organization\'s length limit, or null before the first run.' },
+        { method: 'POST', path: '/v1/core/topology/key-limit-check', purpose: 'Run that check now and return its report.' },
         { method: 'POST', path: '/v1/core/topology/adopt-issued', purpose: 'Make an ID this Core already issued, and took into use as the same type, into a node, keeping the ID, so nothing pointing at it is renumbered. Needs the permission core.authority.adopt-issued.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
@@ -306,6 +309,8 @@ export class SemaCoreHost {
   nodeSetChildListComplete(context: CoreHostRequestContext, input: { nodeId: string; complete: boolean }) { const nodeId = this.text(input.nodeId, 'nodeId'); if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false'); return this.nodeChange(context, 'core.topology.child-list-marked', [nodeId], (nodes) => nodes.setChildListComplete(nodeId, input.complete), () => ({ complete: input.complete })); }
   /** Sets, changes or clears the key limits on an organization node held here. Another Core asks this for a key-limits operation. */
   nodeSetKeyLimits(context: CoreHostRequestContext, input: { nodeId: string; limits?: KeyLimits | null }) { const nodeId = this.text(input.nodeId, 'nodeId'); const limits = this.keyLimits(input.limits); return this.nodeChange(context, 'core.topology.key-limits-set', [nodeId], (nodes) => nodes.setKeyLimits(nodeId, limits), (result) => ({ keyLimits: (result.keyLimits ?? null) as JsonObject | null })); }
+  /** Keeps a basis fetched early on a node held here, ready to take over. Another Core asks this while preparing a ready basis. */
+  nodeSetNextBasis(context: CoreHostRequestContext, input: { nodeId: string; basis: string; switchAt: string }) { const nodeId = this.text(input.nodeId, 'nodeId'), basis = this.text(input.basis, 'basis'); return this.nodeChange(context, 'core.topology.next-basis-kept', [nodeId], (nodes) => nodes.setNextBasis(nodeId, { basis, switchAt: String(input.switchAt) }), (result) => ({ nextBasis: result.nextBasis ?? null, switchAt: result.switchAt ?? null })); }
   /** Records a lost node's old ID as retired, pointing at its replacement. Another Core asks this during replace-lost; it needs the same permission. */
   nodeAcceptRetired(context: CoreHostRequestContext, input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { const id = this.text(input.id, 'id'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId'); const replacementAddress = input.replacementAddress === undefined ? undefined : this.text(input.replacementAddress, 'replacementAddress'); return this.nodeChange(context, 'core.topology.lost-node-recorded', [id, replacementId], (nodes) => nodes.acceptRetired({ id, type, replacementId, replacementAddress }), () => ({ type, replacementId }), 'core.authority.replace-lost'); }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
@@ -409,8 +414,7 @@ export class SemaCoreHost {
     const parentId = input.parentId ? this.text(input.parentId, 'parentId') : undefined;
     return this.conversation(context, 'core.authority.issued-id-adopted', [id, ...(parentId ? [parentId] : [])], async (talk) => {
       const issued = await this.store.issuedIdentifier(id);
-      const { installationId } = await this.store.getHostStatistics();
-      if (!issued || issued.installationId !== installationId) throw new CoreHostValidationError(`${id} was not issued by this Core`);
+      if (!issued) throw new CoreHostValidationError(`${id} was not issued by this Core`); // only this Core writes its own issued records, whatever basis the ID came from
       if (issued.status !== 'ISSUED') throw new CoreHostValidationError(`${id} was reserved but never taken into use`);
       if (issued.typeCode !== type) throw new CoreHostValidationError(`${id} was issued as ${issued.typeCode ?? 'no type'}, not ${type}`);
       const nodeAddress = this.address(input.nodeAddress, 'nodeAddress');
@@ -449,6 +453,57 @@ export class SemaCoreHost {
     if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false');
     return this.conversation(context, 'core.topology.child-list-marked', [nodeId], (talk) => talk.markChildList({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), complete: input.complete }), () => ({ complete: input.complete }));
   }
+  private lastKeyLimitCheck: KeyLimitCheck | undefined;
+  /**
+   * Looks at every active node this Core holds against its organization's length limit, and fetches a ready basis
+   * for any node whose counter has reached nine tenths of it, so the node switches at the limit without waiting.
+   * A machine node uses maxLastSegmentLength (it issues ordinary IDs), falling back to maxSegmentLength; every other
+   * node uses maxSegmentLength. A node past its limit with no ready basis keeps issuing and is reported as over the
+   * limit. Runs on a timer and on request; the last report is kept in memory only and is rebuilt by the next run.
+   */
+  async runKeyLimitCheck(actorId: string | null = null): Promise<KeyLimitCheck> {
+    const checkedAt = new Date().toISOString();
+    if (!this.localNodes || !this.topology) return (this.lastKeyLimitCheck = { checkedAt, nodes: [], note: 'Core-to-Core conversations are not configured on this Core' });
+    const talk = this.conversations(), address = this.ownAddress();
+    const nodes: KeyLimitCheck['nodes'] = [];
+    for (const node of await this.localNodes.counters()) {
+      if (node.status !== 'ACTIVE') continue;
+      const issued = node.issued.toString();
+      try {
+        const organization = node.type === 'ORGANIZATION' ? await this.localNodes.describe(node.id) : (await talk.walkUp(node.id, address)).chain.find((ancestor) => ancestor.type === 'ORGANIZATION');
+        const limits = organization?.keyLimits;
+        const length = node.type === 'MACHINE' ? (limits?.maxLastSegmentLength ?? limits?.maxSegmentLength) : limits?.maxSegmentLength;
+        if (!length) { nodes.push({ nodeId: node.id, basis: node.basis, issued, state: 'NO_LIMIT' }); continue; }
+        const maxValue = BigInt(56) ** BigInt(length) - BigInt(1);
+        const early = maxValue - (maxValue / BigInt(10) > BigInt(0) ? maxValue / BigInt(10) : BigInt(1));
+        const base = { nodeId: node.id, basis: node.basis, issued, limitLength: length, maxValue: maxValue.toString() };
+        if (node.nextBasis) { nodes.push({ ...base, state: 'READY', nextBasis: node.nextBasis, switchAt: node.switchAt?.toString() }); continue; }
+        if (node.issued < early) { nodes.push({ ...base, state: 'OK' }); continue; }
+        try {
+          const prepared = await talk.prepareNextBasis({ nodeId: node.id, nodeAddress: address, switchAt: maxValue });
+          await this.core.recordAudit({ action: 'core.topology.next-basis-prepared', actorId, subjectIds: [node.id, ...(prepared.issuerId ? [prepared.issuerId] : [])], evidence: { nextBasis: prepared.nextBasis ?? null, switchAt: prepared.switchAt ?? null } });
+          nodes.push({ ...base, state: 'READY', nextBasis: prepared.nextBasis, switchAt: prepared.switchAt });
+        } catch (error) {
+          nodes.push({ ...base, state: node.issued > maxValue ? 'OVER_LIMIT' : 'NEEDS_BASIS', reason: error instanceof Error ? error.message : 'A ready basis could not be fetched' });
+        }
+      } catch (error) {
+        nodes.push({ nodeId: node.id, basis: node.basis, issued, state: 'UNCHECKED', reason: error instanceof Error ? error.message : 'The check failed' });
+      }
+    }
+    return (this.lastKeyLimitCheck = { checkedAt, nodes });
+  }
+  /** Runs the check on a timer. The timer never keeps the process alive and a failed run waits for the next. */
+  startKeyLimitChecks(intervalMs: number) {
+    if (!(intervalMs > 0)) return undefined;
+    const timer = setInterval(() => { this.runKeyLimitCheck().catch(() => undefined); }, intervalMs);
+    timer.unref();
+    return timer;
+  }
+  /** The last check's report, or null before the first one. */
+  async topologyKeyLimitStatus(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return this.lastKeyLimitCheck ?? null; }
+  /** Runs the check now and returns its report. */
+  async topologyKeyLimitCheck(context: CoreHostRequestContext) { await this.requireAdministration(context, 'core.topology.write'); return this.runKeyLimitCheck(context.actorId); }
+
   /**
    * Sets, changes or clears an organization's optional key limits, on its organization node wherever it is held.
    * A preference, never needed for uniqueness. Leaving all three out, or sending null, clears them.

@@ -14,11 +14,19 @@ const counts = () => ({ PENDING: 0, RUNNING: 0, WAITING: 0, CANCELLED: 0, FAILED
  * issues is built from. A roll-up of the machine node changes the prefix and restarts the counter here too.
  */
 async function reserve(tx: Db, input: { count: number; typeCode?: string; metadata: JsonObject }) {
+  // When a ready basis waits and the counter would pass switchAt, the machine node switches to it in this same
+  // statement and the values come from the new basis, counter restarted. Every SET sees the row as it was.
+  const count = BigInt(input.count);
   const rows = await tx.$queryRaw<Array<{ installationId: string; localValue: bigint }>>`
-    UPDATE "sema_local_nodes" AS n SET "issued" = n."issued" + ${BigInt(input.count)}, "updatedAt" = NOW()
+    UPDATE "sema_local_nodes" AS n SET
+      "basis" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN n."nextBasis" ELSE n."basis" END,
+      "issued" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN ${count} ELSE n."issued" + ${count} END,
+      "nextBasis" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN NULL ELSE n."nextBasis" END,
+      "switchAt" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN NULL ELSE n."switchAt" END,
+      "updatedAt" = NOW()
     FROM "sema_core_identity_state" AS s
     WHERE s."stateKey" = ${STATE_KEY} AND s."status" = 'ACTIVE' AND n."id" = s."installationId" AND n."status" = 'ACTIVE'
-    RETURNING n."basis" AS "installationId", n."issued" - ${BigInt(input.count)} + 1 AS "localValue"
+    RETURNING n."basis" AS "installationId", n."issued" - ${count} + 1 AS "localValue"
   `;
   const first = rows[0];
   if (!first) throw new Error('SEMA Core KeyID allocator is unavailable');

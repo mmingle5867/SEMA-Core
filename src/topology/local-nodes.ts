@@ -94,6 +94,13 @@ export interface LocalNode {
   /** How many values have been issued from the current basis. Never goes backwards while the basis stands. */
   issued: bigint;
   /**
+   * A basis fetched early from an ancestor, ready to take over. When the counter would pass `switchAt`, the node
+   * switches to it in the same step that issues the next value, so a node that issues many values never waits.
+   * Both are set together, or neither.
+   */
+  nextBasis?: string;
+  switchAt?: bigint;
+  /**
    * False when the list of children may be missing some, as on a node that replaced a lost one. Such a node is
    * never treated as childless until an administrator says its list is complete.
    */
@@ -164,10 +171,26 @@ export interface NodeDescription {
   childListIncomplete?: true;
   /** Present only on an organization node that has chosen limits. Read by a roll-up walking up through it. */
   keyLimits?: KeyLimits;
+  /** A basis fetched early and ready to take over, and the counter value after which it does. */
+  nextBasis?: string;
+  switchAt?: string;
   status: 'ACTIVE' | 'RETIRED';
 }
 
 const segments = (basis: string) => basis.split('-').length;
+
+/**
+ * Takes `count` values from a node's counter. When a ready basis is waiting and the counter would pass `switchAt`,
+ * the node switches to it first and the values come from the new basis, counter restarted. What was left under the
+ * old basis is simply never used. With no ready basis the node keeps issuing: a limit is a preference.
+ */
+export function advance(node: LocalNode, count = 1): { node: LocalNode; basis: string; first: bigint } {
+  if (node.nextBasis && node.switchAt !== undefined && node.issued + BigInt(count) > node.switchAt) {
+    const { nextBasis, switchAt: _done, ...rest } = node;
+    return { node: { ...rest, basis: nextBasis, issued: BigInt(count) }, basis: nextBasis, first: BigInt(1) };
+  }
+  return { node: { ...node, issued: node.issued + BigInt(count) }, basis: node.basis, first: node.issued + BigInt(1) };
+}
 const validId = (id: string) => Boolean(id) && id.split('-').every(Boolean);
 const entry = (child: { childId: string; type: NodeType; address?: string }): ChildEntry => {
   if (!validId(child.childId)) throw new Error('A child ID must be hyphen-separated non-empty segments');
@@ -215,7 +238,7 @@ export class LocalNodes {
    */
   async listWithNextId() {
     const counts = await this.store.countChildren();
-    return (await this.store.list()).map((node) => ({ ...this.describeNode(node, counts.get(node.id) ?? 0), ...(node.status === 'ACTIVE' ? { nextId: `${node.basis}-${encodeBase56(node.issued + BigInt(1))}` } : {}) }));
+    return (await this.store.list()).map((node) => ({ ...this.describeNode(node, counts.get(node.id) ?? 0), ...(node.status === 'ACTIVE' ? { nextId: ((next) => `${next.basis}-${encodeBase56(next.first)}`)(advance(node)) } : {}) }));
   }
 
   async describe(id: string) {
@@ -238,9 +261,9 @@ export class LocalNodes {
     const value = await this.store.mutate(id, (node) => {
       this.requireActive(node);
       requireMayHold(node, child);
-      const issued = node.issued + BigInt(1);
-      const childId = `${node.basis}-${encodeBase56(issued)}`;
-      return { node: { ...node, issued }, result: childId, addChildren: [entry({ childId, type: child.type, address: child.address })] };
+      const next = advance(node);
+      const childId = `${next.basis}-${encodeBase56(next.first)}`;
+      return { node: next.node, result: childId, addChildren: [entry({ childId, type: child.type, address: child.address })] };
     });
     return { value, childCount: (await this.store.children(id)).length };
   }
@@ -249,8 +272,8 @@ export class LocalNodes {
   issueBasis(id: string) {
     return this.store.mutate(id, (node) => {
       this.requireActive(node);
-      const issued = node.issued + BigInt(1);
-      return { node: { ...node, issued }, result: { value: `${node.basis}-${encodeBase56(issued)}` } };
+      const next = advance(node);
+      return { node: next.node, result: { value: `${next.basis}-${encodeBase56(next.first)}` } };
     });
   }
 
@@ -271,8 +294,32 @@ export class LocalNodes {
       this.requireActive(node);
       if (segments(basis) >= segments(node.basis)) throw new Error('A roll-up must make the basis shorter');
       if (!basis.split('-').every(Boolean)) throw new Error('A basis must be hyphen-separated non-empty segments');
-      return { node: { ...node, basis, issued: BigInt(0) }, result: { previousBasis: node.basis, basis } };
+      const { nextBasis: _ready, switchAt: _at, ...rest } = node; // a ready basis was for the old one
+      return { node: { ...rest, basis, issued: BigInt(0) }, result: { previousBasis: node.basis, basis } };
     });
+  }
+
+  /**
+   * Keeps a basis fetched early, ready to take over when the counter would pass `switchAt`. A node holds one ready
+   * basis at most: if it already has one, that one stays and the new value is simply never used.
+   */
+  async setNextBasis(id: string, input: { basis: string; switchAt: bigint | string | number }) {
+    if (!validId(input.basis)) throw new Error('A basis must be hyphen-separated non-empty segments');
+    let switchAt: bigint;
+    try { switchAt = BigInt(input.switchAt); } catch { throw new Error('switchAt must be a whole number'); }
+    if (switchAt < BigInt(1)) throw new Error('switchAt must be a whole number of at least 1');
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      if (input.basis === node.basis || input.basis.startsWith(`${node.basis}-`) || input.basis === id) throw new Error('A ready basis must be issued by an ancestor, not by the node itself');
+      const next: LocalNode = node.nextBasis ? node : { ...node, nextBasis: input.basis, switchAt };
+      return { node: next, result: next };
+    });
+    return this.describeNode(changed, (await this.store.children(id)).length);
+  }
+
+  /** The counters of the nodes held here, for the check that fetches a ready basis before a limit is reached. */
+  async counters() {
+    return (await this.store.list()).map((node) => ({ id: node.id, type: node.type, status: node.status, basis: node.basis, issued: node.issued, ...(node.nextBasis ? { nextBasis: node.nextBasis, switchAt: node.switchAt } : {}) }));
   }
 
   /**
@@ -330,6 +377,6 @@ export class LocalNodes {
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
   private describeNode(node: LocalNode, childCount: number): NodeDescription {
-    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), status: node.status };
+    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), ...(node.nextBasis && node.switchAt !== undefined ? { nextBasis: node.nextBasis, switchAt: node.switchAt.toString() } : {}), status: node.status };
   }
 }
