@@ -52,9 +52,41 @@ export interface ChildEntry {
   address?: string;
 }
 
+/**
+ * Optional limits an organization sets on the IDs issued inside it: a preference, never needed for uniqueness.
+ * `maxSegments` is how many hyphen segments a basis may have before a roll-up may go outside the organization.
+ * `maxSegmentLength` is how many characters a value issued for a node (a child or a new basis) should have, and
+ * `maxLastSegmentLength` the same for values issued as ordinary IDs, the last segment, which may be longer.
+ * Only an organization node holds them. Nothing set means no limit.
+ */
+export interface KeyLimits {
+  maxSegments?: number;
+  maxSegmentLength?: number;
+  maxLastSegmentLength?: number;
+}
+const KEY_LIMIT_RANGES: Record<keyof KeyLimits, [number, number]> = { maxSegments: [2, 64], maxSegmentLength: [1, 12], maxLastSegmentLength: [1, 20] };
+/** Checks a set of limits and drops any left out. Throws on anything that is not a whole number in range. */
+export function checkKeyLimits(input: unknown): KeyLimits {
+  if (input === null || input === undefined) return {};
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error('Key limits must be an object');
+  const limits: KeyLimits = {};
+  for (const [name, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!(name in KEY_LIMIT_RANGES)) throw new Error(`Unknown key limit: ${name}. The limits are maxSegments, maxSegmentLength and maxLastSegmentLength`);
+    if (value === null || value === undefined) continue;
+    const [low, high] = KEY_LIMIT_RANGES[name as keyof KeyLimits];
+    if (!Number.isInteger(value) || (value as number) < low || (value as number) > high) throw new Error(`${name} must be a whole number from ${low} to ${high}`);
+    limits[name as keyof KeyLimits] = value as number;
+  }
+  if (limits.maxSegmentLength !== undefined && limits.maxLastSegmentLength !== undefined && limits.maxLastSegmentLength < limits.maxSegmentLength) throw new Error('maxLastSegmentLength must be at least maxSegmentLength: the last segment may be longer, never shorter');
+  return limits;
+}
+const hasLimits = (limits?: KeyLimits) => Boolean(limits && Object.keys(limits).length);
+
 export interface LocalNode {
   id: string;
   type: NodeType;
+  /** Set only on an organization node, and only when the organization chose limits. */
+  keyLimits?: KeyLimits;
   parentId?: string;
   /** Where to reach the parent's Core, kept as a stable name. Set whenever the pointer is set. */
   parentAddress?: string;
@@ -91,18 +123,18 @@ export interface LocalNodeStore {
 export class InMemoryLocalNodeStore implements LocalNodeStore {
   readonly nodes = new Map<string, LocalNode>();
   readonly lists = new Map<string, Map<string, ChildEntry>>();
-  async get(id: string) { const node = this.nodes.get(id); return node ? { ...node } : undefined; }
-  async list() { return [...this.nodes.values()].map((node) => ({ ...node })); }
+  async get(id: string) { const node = this.nodes.get(id); return node ? structuredClone(node) : undefined; }
+  async list() { return [...this.nodes.values()].map((node) => structuredClone(node)); }
   async insert(node: LocalNode) {
     if (this.nodes.has(node.id)) throw new Error(`Node already exists: ${node.id}`);
-    this.nodes.set(node.id, { ...node });
+    this.nodes.set(node.id, structuredClone(node));
     this.lists.set(node.id, new Map());
   }
   async mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T; addChildren?: ChildEntry[] }) {
     const current = this.nodes.get(id);
     if (!current) throw new Error(`Node does not exist on this Core: ${id}`);
-    const { node, result, addChildren } = change({ ...current });
-    this.nodes.set(id, { ...node });
+    const { node, result, addChildren } = change(structuredClone(current));
+    this.nodes.set(id, structuredClone(node));
     for (const entry of addChildren ?? []) this.lists.get(id)!.set(entry.childId, { ...entry });
     return result;
   }
@@ -130,6 +162,8 @@ export interface NodeDescription {
   childCount: number;
   /** Present, and true, only when the list of children may be missing some. */
   childListIncomplete?: true;
+  /** Present only on an organization node that has chosen limits. Read by a roll-up walking up through it. */
+  keyLimits?: KeyLimits;
   status: 'ACTIVE' | 'RETIRED';
 }
 
@@ -269,6 +303,19 @@ export class LocalNodes {
     return this.store.mutate(id, (node) => ({ node: { ...node, childListComplete: complete }, result: { childListComplete: complete } }));
   }
 
+  /** Sets, changes or clears an organization's key limits. Only an active organization node holds them. Null or nothing clears them. */
+  async setKeyLimits(id: string, input: KeyLimits | null) {
+    const limits = checkKeyLimits(input);
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      if (node.type !== 'ORGANIZATION') throw new Error(`Key limits must be set on an organization node, and ${id} is ${a(node.type)}`);
+      const { keyLimits: _old, ...rest } = node;
+      const next: LocalNode = hasLimits(limits) ? { ...rest, keyLimits: limits } : rest;
+      return { node: next, result: next };
+    });
+    return this.describeNode(changed, (await this.store.children(id)).length);
+  }
+
   /**
    * Retires a node. The record, its own pointer and its list of children stay as they were, so a child that
    * was offline can follow the chain upward. The list is returned so the caller can give the children to the parent.
@@ -283,6 +330,6 @@ export class LocalNodes {
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
   private describeNode(node: LocalNode, childCount: number): NodeDescription {
-    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), status: node.status };
+    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), status: node.status };
   }
 }

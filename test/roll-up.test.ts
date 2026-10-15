@@ -52,4 +52,33 @@ const g3 = await splitTalk.createNode({ parentId: g2.id, type: 'GROUP', newNodeP
 split.delete('9'); // the organization's machine cannot be reached
 assert.equal((await splitTalk.rollUp({ nodeId: g3.id })).issuerId, g1.id, 'the highest node that can still be reached inside the organization issues');
 
+// Key limits: optional, set only on an organization node, a preference that never affects uniqueness.
+await assert.rejects(() => nodes.setKeyLimits(team, { maxSegments: 4 }), /must be set on an organization node, and 5-3-3-3 is a GROUP/);
+await assert.rejects(() => nodes.setKeyLimits(division, { maxSegments: 1 }), /maxSegments must be a whole number from 2 to 64/);
+await assert.rejects(() => nodes.setKeyLimits(division, { maxSegmentLength: 3, maxLastSegmentLength: 2 }), /may be longer, never shorter/);
+await assert.rejects(() => nodes.setKeyLimits(division, { maxDigits: 3 } as never), /Unknown key limit: maxDigits/);
+assert.deepEqual((await nodes.setKeyLimits(division, { maxSegments: 4, maxSegmentLength: 2, maxLastSegmentLength: 5 })).keyLimits, { maxSegments: 4, maxSegmentLength: 2, maxLastSegmentLength: 5 });
+assert.deepEqual((await nodes.describe(division))!.keyLimits, { maxSegments: 4, maxSegmentLength: 2, maxLastSegmentLength: 5 }, 'other Cores see the limits when they ask');
+assert.equal((await nodes.describe(company))!.keyLimits, undefined, 'an organization with no limits shows none');
+
+// Under the division's limit of 4 segments, a node whose basis has 6 may go outside the division; one with 4 may not.
+const over = await add(unit, 'GROUP');                   // 5-3-3-3-3-6, six segments
+assert.deepEqual(await talk.rollUp({ nodeId: over }), { issuerId: '5', previousBasis: over, basis: '5-4' }, 'over the limit, the highest reachable node issues, outside the division');
+const near = await add(team, 'GROUP');                   // 5-3-3-3-5, five segments, still over 4
+assert.equal((await talk.rollUp({ nodeId: near, issuerId: company })).issuerId, company, 'a named issuer in the parent organization is allowed when over the limit');
+await nodes.setKeyLimits(division, { maxSegments: 6 });
+const under = await add(team, 'GROUP');                  // 5-3-3-3-6, five segments, now under 6
+await assert.rejects(() => talk.rollUp({ nodeId: under, issuerId: company }), /unless its basis is over the organization's segment limit/);
+assert.equal((await talk.rollUp({ nodeId: under })).issuerId, division, 'under the limit it stays inside the division');
+
+// An organization node over its own limit may go to its parent organization.
+const sub = await add(division, 'ORGANIZATION');         // 5-3-3-5, four segments
+await assert.rejects(() => talk.rollUp({ nodeId: sub }), /organization node has no ancestor inside its own organization/);
+await nodes.setKeyLimits(sub, { maxSegments: 3 });
+assert.deepEqual(await talk.rollUp({ nodeId: sub }), { issuerId: '5', previousBasis: sub, basis: '5-5' });
+
+// Clearing: null, or nothing, removes the limits.
+assert.equal((await nodes.setKeyLimits(division, null)).keyLimits, undefined);
+assert.equal((await nodes.setKeyLimits(sub, {})).keyLimits, undefined);
+
 console.log('Roll-up test passed.');

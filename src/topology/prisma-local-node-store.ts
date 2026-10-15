@@ -1,10 +1,11 @@
 import { PrismaClient } from '@prisma/client';
-import { isNodeType, type ChildEntry, type LocalNode, type LocalNodeStore } from './local-nodes.js';
+import { isNodeType, type ChildEntry, type KeyLimits, type LocalNode, type LocalNodeStore } from './local-nodes.js';
 
-type Row = { id: string; type: string; parentId: string | null; parentAddress: string | null; basis: string; issued: bigint; childListComplete: boolean; status: string };
+type Row = { id: string; type: string; parentId: string | null; parentAddress: string | null; basis: string; issued: bigint; childListComplete: boolean; status: string; maxSegments: number | null; maxSegmentLength: number | null; maxLastSegmentLength: number | null };
+const limitsOf = (row: Row): KeyLimits | undefined => { const limits: KeyLimits = { ...(row.maxSegments !== null ? { maxSegments: Number(row.maxSegments) } : {}), ...(row.maxSegmentLength !== null ? { maxSegmentLength: Number(row.maxSegmentLength) } : {}), ...(row.maxLastSegmentLength !== null ? { maxLastSegmentLength: Number(row.maxLastSegmentLength) } : {}) }; return Object.keys(limits).length ? limits : undefined; };
 type ChildRow = { childId: string; childType: string; childAddress: string | null };
 const nodeType = (id: string, type: string) => { if (!isNodeType(type)) throw new Error(`Node ${id} has an unknown type: ${type}`); return type; };
-const toNode = (row: Row): LocalNode => ({ id: row.id, type: nodeType(row.id, row.type), ...(row.parentId ? { parentId: row.parentId } : {}), ...(row.parentAddress ? { parentAddress: row.parentAddress } : {}), basis: row.basis, issued: BigInt(row.issued), childListComplete: Boolean(row.childListComplete), status: row.status === 'RETIRED' ? 'RETIRED' : 'ACTIVE' });
+const toNode = (row: Row): LocalNode => ({ id: row.id, type: nodeType(row.id, row.type), ...(limitsOf(row) ? { keyLimits: limitsOf(row) } : {}), ...(row.parentId ? { parentId: row.parentId } : {}), ...(row.parentAddress ? { parentAddress: row.parentAddress } : {}), basis: row.basis, issued: BigInt(row.issued), childListComplete: Boolean(row.childListComplete), status: row.status === 'RETIRED' ? 'RETIRED' : 'ACTIVE' });
 const toChild = (row: ChildRow): ChildEntry => ({ childId: row.childId, type: nodeType(row.childId, row.childType), ...(row.childAddress ? { address: row.childAddress } : {}) });
 type Tx = Pick<PrismaClient, '$executeRaw' | '$queryRaw'>;
 
@@ -24,26 +25,26 @@ async function writeChildren(tx: Tx, id: string, entries: ChildEntry[]) {
 export class PrismaLocalNodeStore implements LocalNodeStore {
   constructor(private readonly prisma: PrismaClient) {}
   async get(id: string) {
-    const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status" FROM "sema_local_nodes" WHERE "id" = ${id}`;
+    const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength" FROM "sema_local_nodes" WHERE "id" = ${id}`;
     return rows[0] ? toNode(rows[0]) : undefined;
   }
   async list() {
-    const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status" FROM "sema_local_nodes" ORDER BY "id"`;
+    const rows = await this.prisma.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength" FROM "sema_local_nodes" ORDER BY "id"`;
     return rows.map(toNode);
   }
   async insert(node: LocalNode) {
     const inserted = await this.prisma.$executeRaw`
-      INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "createdAt", "updatedAt")
-      VALUES (${node.id}, ${node.type}, ${node.parentId ?? null}, ${node.parentAddress ?? null}, ${node.basis}, ${node.issued}, ${node.childListComplete}, ${node.status}, NOW(), NOW())
+      INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength", "createdAt", "updatedAt")
+      VALUES (${node.id}, ${node.type}, ${node.parentId ?? null}, ${node.parentAddress ?? null}, ${node.basis}, ${node.issued}, ${node.childListComplete}, ${node.status}, ${node.keyLimits?.maxSegments ?? null}, ${node.keyLimits?.maxSegmentLength ?? null}, ${node.keyLimits?.maxLastSegmentLength ?? null}, NOW(), NOW())
       ON CONFLICT ("id") DO NOTHING`;
     if (inserted !== 1) throw new Error(`Node already exists: ${node.id}`);
   }
   async mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T; addChildren?: ChildEntry[] }) {
     return this.prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
+      const rows = await tx.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
       if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
       const { node, result, addChildren } = change(toNode(rows[0]));
-      await tx.$executeRaw`UPDATE "sema_local_nodes" SET "parentId" = ${node.parentId ?? null}, "parentAddress" = ${node.parentAddress ?? null}, "basis" = ${node.basis}, "issued" = ${node.issued}, "childListComplete" = ${node.childListComplete}, "status" = ${node.status}, "updatedAt" = NOW() WHERE "id" = ${id}`;
+      await tx.$executeRaw`UPDATE "sema_local_nodes" SET "parentId" = ${node.parentId ?? null}, "parentAddress" = ${node.parentAddress ?? null}, "basis" = ${node.basis}, "issued" = ${node.issued}, "childListComplete" = ${node.childListComplete}, "status" = ${node.status}, "maxSegments" = ${node.keyLimits?.maxSegments ?? null}, "maxSegmentLength" = ${node.keyLimits?.maxSegmentLength ?? null}, "maxLastSegmentLength" = ${node.keyLimits?.maxLastSegmentLength ?? null}, "updatedAt" = NOW() WHERE "id" = ${id}`;
       if (addChildren?.length) await writeChildren(tx, id, addChildren);
       return result;
     });

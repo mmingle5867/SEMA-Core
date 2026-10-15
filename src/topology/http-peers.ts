@@ -1,4 +1,4 @@
-import type { ChildEntry, NodeDescription, NodeType } from './local-nodes.js';
+import type { ChildEntry, KeyLimits, NodeDescription, NodeType } from './local-nodes.js';
 import type { AddressedPeers, NodePeer } from './conversations.js';
 
 export interface PeerCredentials { applicationKey: string; secret: string }
@@ -32,6 +32,7 @@ export class HttpNodePeer implements NodePeer {
   addChildren(id: string, children: ChildEntry[]) { return this.call<{ childCount: number }>('POST', '/add-children', { nodeId: id, children }); }
   removeChild(id: string, childId: string) { return this.call<{ removed: boolean; childCount: number }>('POST', '/remove-child', { nodeId: id, childId }); }
   setChildListComplete(id: string, complete: boolean) { return this.call<{ childListComplete: boolean }>('POST', '/child-list-complete', { nodeId: id, complete }); }
+  setKeyLimits(id: string, limits: KeyLimits | null) { return this.call<NodeDescription>('POST', '/key-limits', { nodeId: id, limits }); }
   retire(id: string) { return this.call<{ parentId?: string; parentAddress?: string; children: ChildEntry[]; childListComplete: boolean }>('POST', '/retire', { nodeId: id }); }
   acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { return this.call<NodeDescription>('POST', '/accept-retired', input); }
 }
@@ -60,7 +61,7 @@ export function joiningPeer(baseUrl: string, joinCode: string, timeoutMs = 10_00
       if (response.ok && payload?.status === 'NOT_JOINED') return undefined;
       throw new Error('The Core at this address has joined a system; ask it through the node routes');
     },
-    children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet,
+    setKeyLimits: notYet, children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet,
   };
 }
 

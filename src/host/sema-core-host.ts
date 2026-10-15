@@ -4,7 +4,7 @@ import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
-import { isNodeType, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
+import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
 import { Conversations, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 import { encodeBase56 } from '../identity/base56.js';
 import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './install-code.js';
@@ -182,6 +182,8 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
         { method: 'POST', path: '/v1/core/topology/replace-lost', purpose: 'Record that a node was lost and name the node that replaced it; its children follow the retired record to the replacement. Needs the permission core.authority.replace-lost.' },
         { method: 'POST', path: '/v1/core/topology/nodes/accept-retired', purpose: 'Record the old ID of a lost node as retired, pointing at its replacement. Used between Cores during replace-lost; needs core.authority.replace-lost.' },
+        { method: 'POST', path: '/v1/core/topology/key-limits', purpose: 'Set, change or clear an organization\'s optional key limits: maxSegments, maxSegmentLength, maxLastSegmentLength. A roll-up may leave the organization only when the basis has more segments than maxSegments.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/key-limits', purpose: 'Set, change or clear the key limits on an organization node held here. Used between Cores during key-limits.' },
         { method: 'POST', path: '/v1/core/topology/adopt-issued', purpose: 'Make an ID this Core already issued, and took into use as the same type, into a node, keeping the ID, so nothing pointing at it is renumbered. Needs the permission core.authority.adopt-issued.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
@@ -280,6 +282,7 @@ export class SemaCoreHost {
 
   // Nodes held by this Core. Operations across machines are conversations between Cores built from these.
   private requireNodes() { if (!this.localNodes) throw new CoreHostValidationError('Local nodes are not enabled on this Core'); return this.localNodes; }
+  private keyLimits(value: unknown) { try { return checkKeyLimits(value); } catch (error) { throw new CoreHostValidationError(error instanceof Error ? error.message : 'Invalid key limits'); } }
   private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
   private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, SITE, USER or MACHINE'); return value; }
   private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
@@ -301,6 +304,8 @@ export class SemaCoreHost {
   nodeAddChildren(context: CoreHostRequestContext, input: { nodeId: string; children: unknown }) { const nodeId = this.text(input.nodeId, 'nodeId'), children = this.childEntries(input.children); return this.nodeChange(context, 'core.topology.children-added', [nodeId, ...children.map((child) => child.childId)], (nodes) => nodes.addChildren(nodeId, children), (result) => ({ added: children.length, childCount: result.childCount })); }
   nodeRemoveChild(context: CoreHostRequestContext, input: { nodeId: string; childId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'), childId = this.text(input.childId, 'childId'); return this.nodeChange(context, 'core.topology.child-removed', [nodeId, childId], (nodes) => nodes.removeChild(nodeId, childId), (result) => ({ removed: result.removed, childCount: result.childCount })); }
   nodeSetChildListComplete(context: CoreHostRequestContext, input: { nodeId: string; complete: boolean }) { const nodeId = this.text(input.nodeId, 'nodeId'); if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false'); return this.nodeChange(context, 'core.topology.child-list-marked', [nodeId], (nodes) => nodes.setChildListComplete(nodeId, input.complete), () => ({ complete: input.complete })); }
+  /** Sets, changes or clears the key limits on an organization node held here. Another Core asks this for a key-limits operation. */
+  nodeSetKeyLimits(context: CoreHostRequestContext, input: { nodeId: string; limits?: KeyLimits | null }) { const nodeId = this.text(input.nodeId, 'nodeId'); const limits = this.keyLimits(input.limits); return this.nodeChange(context, 'core.topology.key-limits-set', [nodeId], (nodes) => nodes.setKeyLimits(nodeId, limits), (result) => ({ keyLimits: (result.keyLimits ?? null) as JsonObject | null })); }
   /** Records a lost node's old ID as retired, pointing at its replacement. Another Core asks this during replace-lost; it needs the same permission. */
   nodeAcceptRetired(context: CoreHostRequestContext, input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { const id = this.text(input.id, 'id'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId'); const replacementAddress = input.replacementAddress === undefined ? undefined : this.text(input.replacementAddress, 'replacementAddress'); return this.nodeChange(context, 'core.topology.lost-node-recorded', [id, replacementId], (nodes) => nodes.acceptRetired({ id, type, replacementId, replacementAddress }), () => ({ type, replacementId }), 'core.authority.replace-lost'); }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
@@ -443,6 +448,15 @@ export class SemaCoreHost {
     const nodeId = this.text(input.nodeId, 'nodeId');
     if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false');
     return this.conversation(context, 'core.topology.child-list-marked', [nodeId], (talk) => talk.markChildList({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), complete: input.complete }), () => ({ complete: input.complete }));
+  }
+  /**
+   * Sets, changes or clears an organization's optional key limits, on its organization node wherever it is held.
+   * A preference, never needed for uniqueness. Leaving all three out, or sending null, clears them.
+   */
+  topologySetKeyLimits(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; maxSegments?: number | null; maxSegmentLength?: number | null; maxLastSegmentLength?: number | null }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    const limits = this.keyLimits({ maxSegments: input.maxSegments, maxSegmentLength: input.maxSegmentLength, maxLastSegmentLength: input.maxLastSegmentLength });
+    return this.conversation(context, 'core.topology.key-limits-set', [nodeId], (talk) => talk.setKeyLimits({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), limits }), (result) => ({ keyLimits: (result.keyLimits ?? null) as JsonObject | null }));
   }
 
   private async requireRead(context: CoreHostRequestContext, resource: string) {

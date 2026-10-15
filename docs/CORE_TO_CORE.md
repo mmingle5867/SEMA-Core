@@ -25,6 +25,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/add-parent-above` `{nodeId, nodeAddress?, type, newNodeAddress?, issuerId?, issuerAddress?}` | New parent above a node that has none, so the tree grows from the ground up. Needs `core.authority.add-top`, not `core.topology.write`. See below. |
 | `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
 | `POST /v1/core/topology/adopt-issued` `{id, type, parentId?, parentAddress?, nodeAddress?}` | Makes an ID this Core already issued into a node, keeping the ID. Needs `core.authority.adopt-issued`. See below. |
+| `POST /v1/core/topology/key-limits` `{nodeId, nodeAddress?, maxSegments?, maxSegmentLength?, maxLastSegmentLength?}` | Sets, changes or clears an organization's optional key limits. See below. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
 | `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; its children go on its parent's list, and each follows the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from a reachable ancestor inside the node's own organization (its nearest organization ancestor or a node between), by default the highest. Going outside the organization will need a segment limit the node is over; no limits exist yet, so an organization node cannot roll up. |
@@ -169,3 +170,13 @@ Pointing a lost node's children at another node is a powerful act. It has its ow
 ## Testing the PostgreSQL stores
 
 `npm test` uses the in-memory stores. `npm run test:postgres` runs the node store and Core's start-up against a real database: set `SEMA_CORE_TEST_DATABASE_URL` to an empty, migrated database that is not the live one. Without it the test is skipped.
+
+## Key limits
+
+An organization may set optional limits on the IDs issued inside it, on its organization node: `maxSegments` (2 to 64), `maxSegmentLength` (1 to 12 characters) and `maxLastSegmentLength` (1 to 20, at least `maxSegmentLength`). They are a preference and never needed for uniqueness. Nothing set means no limit. `POST /v1/core/topology/key-limits` sets, changes or clears them (null, or leaving all three out, clears them); it needs `core.topology.write`. They are stored on the organization node and shown when the node is described, so another Core walking up through it can read them.
+
+What uses them today:
+
+- **A roll-up may leave the organization** only when the node's basis has more segments than `maxSegments`. Then any reachable ancestor may issue, a parent organization or above. An organization node uses its own limit, so it can roll up only when over it.
+
+Not built yet: the two length limits are stored but nothing acts on them. The next step is a ready next basis fetched in the background, so a node switches to it when its counter reaches the length limit and never waits; at the limit with no ready basis it keeps issuing and the Console flags it.
