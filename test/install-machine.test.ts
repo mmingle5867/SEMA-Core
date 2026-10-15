@@ -71,7 +71,7 @@ async function startCore(withAddress: boolean) {
     const response = await fetch(address + path, { method: 'POST', headers: { 'x-sema-application-key': 'peer', 'x-sema-application-secret': 'peer-secret', 'content-type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, payload: await response.json() as any };
   };
-  await nodes.accept({ id: '3', type: 'MACHINE' });
+  await nodes.accept({ id: '3', type: 'SITE' });
   return { server, address, nodes, post, store };
 }
 const A = await startCore(true);

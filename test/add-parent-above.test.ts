@@ -6,7 +6,7 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
 {
   const nodes = new LocalNodes(new InMemoryLocalNodeStore());
   const talk = new Conversations({ find: async () => nodes });
-  await nodes.accept({ id: '3', type: 'MACHINE' });
+  await nodes.accept({ id: '3', type: 'GROUP' });
   const child = await talk.createNode({ parentId: '3', type: 'USER', newNodePeer: nodes });
   assert.equal(child.id, '3-3');
 
@@ -26,9 +26,9 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   assert.deepEqual((await talk.walkUp('3-3')).chain.map((node) => node.id), ['3', '3-4', '3-5']);
 
   // Left to itself the top node issues, and a named issuer is used as given.
-  const third = await talk.addParentAbove({ nodeId: '3-5', type: 'GROUP', newNodePeer: nodes });
+  const third = await talk.addParentAbove({ nodeId: '3-5', type: 'ORGANIZATION', newNodePeer: nodes });
   assert.deepEqual(third, { id: '3-5-3', childId: '3-5', issuerId: '3-5' });
-  const fourth = await talk.addParentAbove({ nodeId: '3-5-3', type: 'GROUP', newNodePeer: nodes, issuerId: '3-4' });
+  const fourth = await talk.addParentAbove({ nodeId: '3-5-3', type: 'ORGANIZATION', newNodePeer: nodes, issuerId: '3-4' });
   assert.deepEqual(fourth, { id: '3-4-3', childId: '3-5-3', issuerId: '3-4' });
 
   // The new top issues its own children from its own basis, and nothing was ever issued twice.
@@ -48,7 +48,7 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   const lone = new LocalNodes(new InMemoryLocalNodeStore());
   await lone.accept({ id: '3', type: 'MACHINE' });
   const refusing = { accept: async () => { throw new Error('refused'); } } as unknown as NodePeer;
-  await assert.rejects(() => new Conversations({ find: async () => lone }).addParentAbove({ nodeId: '3', type: 'GROUP', newNodePeer: refusing }), /refused/);
+  await assert.rejects(() => new Conversations({ find: async () => lone }).addParentAbove({ nodeId: '3', type: 'SITE', newNodePeer: refusing }), /refused/);
   assert.deepEqual(await lone.describe('3'), { id: '3', type: 'MACHINE', basis: '3', childCount: 0, status: 'ACTIVE' });
   assert.equal((await lone.listWithNextId())[0].nextId, '3-4', 'the refused value 3-3 is never used again');
 }
@@ -83,8 +83,12 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   r = await post('/v1/core/topology/add-parent-above', { nodeId: '3' });
   assert.equal(r.status, 400, 'the type of the new parent must be named');
   r = await post('/v1/core/topology/add-parent-above', { nodeId: '3', type: 'ORGANIZATION' });
+  assert.equal(r.status, 400, 'a machine sits under a site, not directly under an organization');
+  assert.equal((await nodes.listWithNextId())[0].nextId, '3-3', 'checked before anything is issued');
+  assert.equal((await nodes.list()).length, 1, 'and no node is left behind');
+  r = await post('/v1/core/topology/add-parent-above', { nodeId: '3', type: 'SITE' });
   assert.equal(r.status, 201);
-  assert.deepEqual(r.payload, { id: '3-3', childId: '3', issuerId: '3', type: 'ORGANIZATION', address });
+  assert.deepEqual(r.payload, { id: '3-3', childId: '3', issuerId: '3', type: 'SITE', address });
   assert.equal((await nodes.describe('3'))!.parentAddress, address, 'the top node stores where its new parent lives');
 
   // Above that new top: node 3 is held here and has the shortest basis, so it issues, not the current top.

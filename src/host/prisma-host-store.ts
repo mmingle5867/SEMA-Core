@@ -67,6 +67,10 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
       WHERE "counterKey" = ${STATE_KEY} AND "issued" + 1 < "blockEnd" RETURNING "issued"`;
     return rows[0] ? BigInt(rows[0].issued) : undefined;
   }
+  async issuedIdentifier(id: string): Promise<SemaIdentifier | undefined> {
+    const row = await this.prisma.semaIssuedIdentifier.findUnique({ where: { semaId: id } });
+    return row ? { id: row.semaId, reservationId: row.reservationId, installationId: row.installationId, localValue: row.localValue, localCode: row.localCode, typeCode: row.typeCode ?? undefined, status: row.status as SemaIdentifier['status'], metadata: object(row.metadata) } : undefined;
+  }
   /** The node this Core is, once it has an identity. Undefined on a Core that has not joined a system yet. */
   async storedInstallationId() {
     const state = await this.prisma.semaCoreIdentityState.findUnique({ where: { stateKey: STATE_KEY } });

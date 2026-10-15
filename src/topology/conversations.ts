@@ -1,4 +1,4 @@
-import type { ChildEntry, NodeDescription, NodeType } from './local-nodes.js';
+import { requireMayHold, type ChildEntry, type NodeDescription, type NodeType } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -135,11 +135,32 @@ export class Conversations {
     }
   }
 
+  /**
+   * Makes an ID that was already issued, and never used as a node, into a node. Nothing is issued: the ID keeps the
+   * value it was given. The caller has checked that the ID was issued and what it was issued for. With a parent, the
+   * parent lists the node first, so a failure leaves one entry too many; without one, the node is a top node.
+   */
+  async placeIssued(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string; nodePeer: NodePeer; nodeAddress?: string }) {
+    if (input.parentId === input.id) throw new Error('A node cannot be its own parent');
+    if (await input.nodePeer.describe(input.id)) throw new Error(`${input.id} is already a node`);
+    const parent = input.parentId ? await this.mustPeer(input.parentId, 'The parent', input.parentAddress) : undefined;
+    if (parent && input.parentId) await parent.addChildren(input.parentId, [{ childId: input.id, type: input.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
+    try {
+      return await input.nodePeer.accept({ id: input.id, type: input.type, parentId: input.parentId, parentAddress: input.parentAddress });
+    } catch (error) {
+      let held: boolean | undefined;
+      try { held = Boolean(await input.nodePeer.describe(input.id)); } catch { held = undefined; }
+      if (parent && input.parentId && held === false) await parent.removeChild(input.parentId, input.id).catch(() => undefined);
+      throw error;
+    }
+  }
+
   /** Inserts a new node between a node and its parent. */
   async insertAbove(input: { childId: string; childAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string }) {
     const child = await this.describeNode(input.childId, input.childAddress);
     if (typeof child === 'string') throw new Error(`The node is not reachable: ${input.childId}`);
     if (!child.parentId) throw new Error('A top node has no parent to insert under');
+    requireMayHold({ id: 'the new node', type: input.type }, { childId: input.childId, type: child.type }); // checked before anything is issued
     const parentId = child.parentId;
     const parent = await this.mustPeer(parentId, 'The parent', child.parentAddress);
     const issued = await parent.issueChildId(parentId, { type: input.type, ...(input.newNodeAddress ? { address: input.newNodeAddress } : {}) });
@@ -163,6 +184,7 @@ export class Conversations {
     if (typeof top === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
     if (top.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
     if (top.parentId) throw new Error('This node already has a parent. Use insert-above to put a node between them');
+    requireMayHold({ id: 'the new parent', type: input.type }, { childId: input.nodeId, type: top.type }); // checked before anything is issued
     const candidates = [{ id: top.id, basis: top.basis, address: input.nodeAddress }, ...(input.alsoConsider ?? [])];
     const issuer = input.issuerId
       ? { id: input.issuerId, address: input.issuerAddress }
