@@ -20,6 +20,7 @@ export class InMemorySemaCoreHostStore extends InMemorySemaCoreStore implements 
     this.firstIdBlock.issued += BigInt(1);
     return this.firstIdBlock.issued;
   }
+  async issuedIdentifier(id: string) { const identifier = this.identifiers.get(id); return identifier ? structuredClone(identifier) : undefined; }
 
   async getHostSettings() { return this.hostSettings ? structuredClone(this.hostSettings) : null; }
   async saveHostSettings(settings: VersionedCoreHostSettings) { this.hostSettings = structuredClone(settings); return structuredClone(settings); }

@@ -24,6 +24,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
 | `POST /v1/core/topology/add-parent-above` `{nodeId, nodeAddress?, type, newNodeAddress?, issuerId?, issuerAddress?}` | New parent above a node that has none, so the tree grows from the ground up. Needs `core.authority.add-top`, not `core.topology.write`. See below. |
 | `POST /v1/core/topology/replace-lost` `{lostId, type, replacementId, replacementAddress?, lostParentId?, lostParentAddress?}` | Records that a node was lost and names the node that replaced it. Needs `core.authority.replace-lost`. See below. |
+| `POST /v1/core/topology/adopt-issued` `{id, type, parentId?, parentAddress?, nodeAddress?}` | Makes an ID this Core already issued into a node, keeping the ID. Needs `core.authority.adopt-issued`. See below. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
 | `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; its children go on its parent's list, and each follows the pointer later. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from the highest reachable ancestor. |
@@ -50,16 +51,36 @@ Every node has a `type`. Core lists only the types its own rules treat different
 
 | Type | What it is | Takes a seat |
 | --- | --- | --- |
-| `ORGANIZATION` | A company, with its own keyholders and its own seat limits. | No |
-| `GROUP` | A grouping inside one: department, site, network. | No |
+| `ORGANIZATION` | A company, or a division of one, with its own keyholders and its own seat limits. | No |
+| `GROUP` | A grouping of people: department, team. | No |
+| `SITE` | A grouping of machines: site, building, network. | No |
 | `USER` | A person. | Yes, a user seat |
 | `MACHINE` | A PC or device. | Yes, a machine seat |
 
-Finer detail (laptop, printer, sales department) is a description kept by Foundation Access.
+Finer detail (laptop, printer, sales department, room) is a description kept by Foundation Access.
 
 The type is named when the node is created and recorded once, by the Core that holds the node. A create or insert without it is refused before any number is issued. Nothing changes it afterwards: not a rehome, a roll-up or a removal. A different type is a new node with a new ID.
 
 A machine's own node is a `MACHINE`. Seat limits are not built yet.
+
+### Which types may sit under which
+
+| Under | May sit |
+| --- | --- |
+| `ORGANIZATION` | `ORGANIZATION` (a division), `GROUP`, `SITE`, `USER` |
+| `GROUP` | `GROUP`, `USER` |
+| `SITE` | `SITE`, `MACHINE` |
+| `USER`, `MACHINE` | Nothing in the tree |
+
+A group and a site are separate types because the parent means different things on each side: on the people side it gives a person their permissions, on the physical side it gives a machine its ceiling. Every way a node gets a parent passes through the parent's own Core (issuing a child, or adding children), so the rule is checked there. A refusal is a 400 and leaves nothing behind: insert-above and add-parent-above check before anything is issued, and the other operations add the child to its new parent first. Removing a node whose children could not sit under its parent is refused until they are moved, for example a site with machines under an organization.
+
+## Making an issued ID into a node
+
+`POST /v1/core/topology/adopt-issued` `{id, type, parentId?, parentAddress?, nodeAddress?}` records a node for an ID this Core already issued, keeping the ID, so nothing that already points at it has to be renumbered. It is for records made before they were nodes, such as the organization and user Foundation Access recorded when it was set up. Nothing is issued.
+
+It is refused unless this Core issued the ID, the ID was taken into use (not only reserved), it was issued as the same type (`typeCode`), and it is not a node yet. With a parent, the parent lists the node first, so a failure leaves one entry too many; without one, the node is a top node. The placement rule above applies.
+
+It has its own permission, `core.authority.adopt-issued`, which a grant of `core.topology.*` does not cover and nobody holds by default. It is granted by hand for the occasion and removed afterwards.
 
 ## Installing a new machine
 

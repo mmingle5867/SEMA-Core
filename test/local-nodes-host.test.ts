@@ -15,8 +15,8 @@ const post = async (path: string, body: unknown, headers: Record<string, string>
 };
 const describe = async (id: string) => (await (await fetch(`${base}?id=${encodeURIComponent(id)}`, { headers: admin })).json()) as Record<string, any> | null;
 
-assert.equal((await post('accept', { id: '3-3', type: 'MACHINE' })).status, 201, 'a node on this machine, placed by a console operation');
-assert.deepEqual(await describe('3-3'), { id: '3-3', type: 'MACHINE', basis: '3-3', childCount: 0, status: 'ACTIVE' });
+assert.equal((await post('accept', { id: '3-3', type: 'GROUP' })).status, 201, 'a node on this machine, placed by a console operation');
+assert.deepEqual(await describe('3-3'), { id: '3-3', type: 'GROUP', basis: '3-3', childCount: 0, status: 'ACTIVE' });
 assert.equal((await post('accept', { id: '3-8' })).status, 400, 'a node cannot be recorded without its type');
 assert.equal((await post('accept', { id: '3-8', type: 'PRINTER' })).status, 400);
 assert.equal(await describe('3-8'), null);
@@ -37,6 +37,10 @@ assert.equal((await post('set-parent', { nodeId: '3-3-9', parentId: '3' })).body
 assert.deepEqual((await post('add-children', { nodeId: '3', children: [] })).status, 500, 'only a node held here gains children');
 assert.deepEqual((await post('add-children', { nodeId: '3-3', children: [{ childId: '3-3-9', type: 'USER' }] })).body, { childCount: 2 });
 assert.equal((await post('add-children', { nodeId: '3-3', children: [{ childId: '3-3-7', type: 'PRINTER' }] })).status, 400);
+const misplaced = await post('add-children', { nodeId: '3-3', children: [{ childId: '3-3-7', type: 'MACHINE' }] });
+assert.equal(misplaced.status, 400, 'a machine under a group of people is refused as a bad request');
+assert.match(misplaced.body.error.message, /A MACHINE cannot sit under a GROUP/);
+assert.equal((await post('issue-child', { nodeId: '3-3', type: 'SITE' })).status, 400);
 assert.equal((await post('add-children', { nodeId: '3-3', children: 'nope' })).status, 400);
 assert.deepEqual((await post('remove-child', { nodeId: '3-3', childId: '3-3-3' })).body, { removed: true, childCount: 1 });
 assert.deepEqual((await post('remove-child', { nodeId: '3-3', childId: '3-3-3' })).body, { removed: false, childCount: 1 });

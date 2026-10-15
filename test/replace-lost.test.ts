@@ -88,7 +88,7 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
     const response = await fetch(address + path, { method: 'POST', headers: { 'x-sema-application-key': 'peer', 'x-sema-application-secret': 'peer-secret', 'content-type': 'application/json' }, body: JSON.stringify(body) });
     return { status: response.status, payload: await response.json() as any };
   };
-  await nodes.accept({ id: '3', type: 'MACHINE' });
+  await nodes.accept({ id: '3', type: 'ORGANIZATION' });
   await nodes.accept({ id: '3-4', type: 'GROUP', parentId: '3', parentAddress: address });
   await nodes.addChildren('3', [{ childId: '3-3', type: 'GROUP' }, { childId: '3-4', type: 'GROUP' }]); // the lost node 3-3 and its replacement 3-4
 

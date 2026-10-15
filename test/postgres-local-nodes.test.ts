@@ -26,6 +26,9 @@ try {
   await assert.rejects(() => host.initializeIdentity('3'), /unavailable/);
   assert.deepEqual(await new LocalNodes(new PrismaLocalNodeStore(prisma)).describe('3-J'), { id: '3-J', type: 'MACHINE', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-J', childCount: 0, status: 'ACTIVE' });
   assert.equal((await host.reserveIdentifiers({ count: 1, metadata: {} })).identifiers[0].id, '3-J-3', 'a joined machine issues its IDs from its own node');
+  // How an ID this Core issued was recorded, read back by ID; an ID it never issued has no record.
+  assert.deepEqual(await host.issuedIdentifier('3-J-3'), { id: '3-J-3', reservationId: (await host.issuedIdentifier('3-J-3'))!.reservationId, installationId: '3-J', localValue: BigInt(1), localCode: '3', typeCode: undefined, status: 'RESERVED', metadata: {} });
+  assert.equal(await host.issuedIdentifier('3-J-9'), undefined);
 
   // Back to an empty database for the rest: the first node of a new system.
   await prisma.$executeRaw`DELETE FROM "sema_issued_identifiers"`;
@@ -52,13 +55,13 @@ try {
   assert.deepEqual(await nodes.describe('3'), { id: '3', type: 'MACHINE', basis: '3', childCount: 0, status: 'ACTIVE' });
 
   // Every type is stored and read back, and a node cannot be recorded without one.
-  for (const [id, type] of [['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE']] as const) {
+  for (const [id, type] of [['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE'], ['3-T6', 'SITE']] as const) {
     await nodes.accept({ id, type, parentId: '3', parentAddress: 'http://parent.example:4310' });
     assert.deepEqual(await nodes.describe(id), { id, type, parentId: '3', parentAddress: 'http://parent.example:4310', basis: id, childCount: 0, status: 'ACTIVE' });
   }
-  await assert.rejects(() => nodes.accept({ id: '3-T5' } as never), /ORGANIZATION, GROUP, USER or MACHINE/);
+  await assert.rejects(() => nodes.accept({ id: '3-T5' } as never), /ORGANIZATION, GROUP, SITE, USER or MACHINE/);
   await assert.rejects(() => nodes.accept({ id: '3-T3', type: 'USER' }), /already exists/);
-  assert.deepEqual((await nodes.list()).map((node) => [node.id, node.type]), [['3', 'MACHINE'], ['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE']]);
+  assert.deepEqual((await nodes.list()).map((node) => [node.id, node.type]), [['3', 'MACHINE'], ['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE'], ['3-T6', 'SITE']]);
 
   assert.equal((await nodes.listWithNextId()).find((node) => node.id === '3-T1')!.nextId, '3-T1-3');
 

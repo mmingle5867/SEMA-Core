@@ -69,7 +69,7 @@ function classify(error: unknown): { status: number; code: string; message: stri
   if (error instanceof CoreHostValidationError) return { status: 400, code: 'INVALID_REQUEST', message: error.message };
   const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
   // Errors raised by custom authorization or store implementations are still recognised by message.
-  const status = /not authorized/i.test(message) ? 403 : /JSON|Request body|must be|cannot exceed/i.test(message) ? 400 : 500;
+  const status = /not authorized/i.test(message) ? 403 : /JSON|Request body|must be|cannot exceed|cannot sit under|no children in the tree|is already a node/i.test(message) ? 400 : 500;
   return { status, code: status === 403 ? 'FORBIDDEN' : status === 400 ? 'INVALID_REQUEST' : 'CORE_HOST_ERROR', message };
 }
 
@@ -127,6 +127,7 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as Parameters<typeof host.topologyInsertAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/add-parent-above') return write(response, 201, await host.topologyAddParentAbove(context, await readJson(request) as Parameters<typeof host.topologyAddParentAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await readJson(request) as Parameters<typeof host.topologyReplaceLost>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/adopt-issued') return write(response, 201, await host.topologyAdoptIssued(context, await readJson(request) as Parameters<typeof host.topologyAdoptIssued>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/rehome') return write(response, 200, await host.topologyRehome(context, await readJson(request) as Parameters<typeof host.topologyRehome>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/remove') return write(response, 200, await host.topologyRemove(context, await readJson(request) as Parameters<typeof host.topologyRemove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/roll-up') return write(response, 200, await host.topologyRollUp(context, await readJson(request) as Parameters<typeof host.topologyRollUp>[1]));

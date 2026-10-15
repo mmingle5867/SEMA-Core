@@ -1,4 +1,4 @@
-import type { CoreCapability, CoreLifecycleStatus, JsonObject } from '../core/types.js';
+import type { CoreCapability, CoreLifecycleStatus, JsonObject, SemaIdentifier } from '../core/types.js';
 
 /**
  * Installation-level settings. `documentationEnabled`, `auditRetentionDays`, `eventRetentionDays`
@@ -64,6 +64,8 @@ export interface CoreHostStore {
    * Undefined when this Core holds no block, or its block is used up.
    */
   issueTopLevelValue(): Promise<bigint | undefined>;
+  /** How an ID this Core issued was recorded, or undefined when this Core has no record of issuing it. */
+  issuedIdentifier(id: string): Promise<SemaIdentifier | undefined>;
 }
 
 export interface CoreHostAuthorization {

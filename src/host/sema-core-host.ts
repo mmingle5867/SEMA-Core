@@ -182,6 +182,7 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/add-parent-above', purpose: 'Add a parent above a top node, so the tree grows from the ground up. Needs the permission core.authority.add-top.' },
         { method: 'POST', path: '/v1/core/topology/replace-lost', purpose: 'Record that a node was lost and name the node that replaced it; its children follow the retired record to the replacement. Needs the permission core.authority.replace-lost.' },
         { method: 'POST', path: '/v1/core/topology/nodes/accept-retired', purpose: 'Record the old ID of a lost node as retired, pointing at its replacement. Used between Cores during replace-lost; needs core.authority.replace-lost.' },
+        { method: 'POST', path: '/v1/core/topology/adopt-issued', purpose: 'Make an ID this Core already issued, and took into use as the same type, into a node, keeping the ID, so nothing pointing at it is renumbered. Needs the permission core.authority.adopt-issued.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
         { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
         { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
@@ -280,7 +281,7 @@ export class SemaCoreHost {
   // Nodes held by this Core. Operations across machines are conversations between Cores built from these.
   private requireNodes() { if (!this.localNodes) throw new CoreHostValidationError('Local nodes are not enabled on this Core'); return this.localNodes; }
   private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
-  private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, USER or MACHINE'); return value; }
+  private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, SITE, USER or MACHINE'); return value; }
   private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
     await this.requireAdministration(context, permission);
     const result = await work(this.requireNodes());
@@ -390,6 +391,27 @@ export class SemaCoreHost {
     const lostId = this.text(input.lostId, 'lostId'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId');
     const lostParentId = input.lostParentId ? this.text(input.lostParentId, 'lostParentId') : undefined;
     return this.conversation(context, 'core.topology.lost-node-replaced', [lostId, replacementId, ...(lostParentId ? [lostParentId] : [])], (talk) => talk.replaceLost({ lostId, type, replacementId, replacementAddress: this.address(input.replacementAddress, 'replacementAddress'), lostParentId, lostParentAddress: lostParentId ? this.address(input.lostParentAddress, 'lostParentAddress') : undefined }), (result) => ({ type, replacementId, lostParentId: lostParentId ?? null, oldParentListStale: result.oldParentListStale }), 'core.authority.replace-lost');
+  }
+  /**
+   * Makes an ID this Core already issued into a node, keeping the ID, so nothing that already points at it has to
+   * be renumbered. Used for records made before they were nodes, such as an organization or a user first recorded
+   * in Foundation Access. Refused unless this Core issued the ID, it was taken into use, it was issued as the same
+   * type, and it is not a node yet. It has its own permission, `core.authority.adopt-issued`, which no grant of
+   * `core.topology.*` covers and nobody holds by default.
+   */
+  topologyAdoptIssued(context: CoreHostRequestContext, input: { id: string; type: NodeType; parentId?: string; parentAddress?: string; nodeAddress?: string }) {
+    const id = this.text(input.id, 'id'), type = this.nodeType(input.type);
+    const parentId = input.parentId ? this.text(input.parentId, 'parentId') : undefined;
+    return this.conversation(context, 'core.authority.issued-id-adopted', [id, ...(parentId ? [parentId] : [])], async (talk) => {
+      const issued = await this.store.issuedIdentifier(id);
+      const { installationId } = await this.store.getHostStatistics();
+      if (!issued || issued.installationId !== installationId) throw new CoreHostValidationError(`${id} was not issued by this Core`);
+      if (issued.status !== 'ISSUED') throw new CoreHostValidationError(`${id} was reserved but never taken into use`);
+      if (issued.typeCode !== type) throw new CoreHostValidationError(`${id} was issued as ${issued.typeCode ?? 'no type'}, not ${type}`);
+      const nodeAddress = this.address(input.nodeAddress, 'nodeAddress');
+      const placed = await talk.placeIssued({ id, type, parentId, parentAddress: parentId ? this.address(input.parentAddress, 'parentAddress') : undefined, nodePeer: await this.placement(nodeAddress), nodeAddress });
+      return { ...placed, address: nodeAddress ?? null };
+    }, (result) => ({ type, parentId: parentId ?? null, address: result.address }), 'core.authority.adopt-issued');
   }
   /** Moves a node and everything below it under a new parent. Only a move under itself is refused. */
   topologyRehome(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; newParentId: string; newParentAddress?: string; administratorOverride?: boolean }) {

@@ -22,11 +22,11 @@ const count = async (id: string) => (await cores.get(id)!.describe(id))!.childCo
 const parentOf = async (id: string) => (await cores.get(id)!.describe(id))!.parentId;
 
 // The central authority allocates the top node. Children are issued by their parent's Core and accepted by their own.
-await place('3', fresh(), 'core-top.example').accept({ id: '3', type: 'MACHINE' });
+await place('3', fresh(), 'core-top.example').accept({ id: '3', type: 'SITE' });
 const make = async (parentId: string) => {
   const peer = fresh();
   const address = `core-m${++machines}.example`;
-  const created = await talk.createNode({ parentId, parentAddress: addressOf(parentId), type: 'MACHINE', newNodePeer: peer, newNodeAddress: address });
+  const created = await talk.createNode({ parentId, parentAddress: addressOf(parentId), type: 'SITE', newNodePeer: peer, newNodeAddress: address });
   place(created.id, peer, address);
   return created.id;
 };
@@ -76,12 +76,12 @@ down.delete('3');
 const aBefore = await count(a);
 const nPeer = fresh();
 const nAddress = 'core-inserted.example';
-const inserted = await talk.insertAbove({ childId: b, childAddress: addressOf(b), type: 'ORGANIZATION', newNodePeer: nPeer, newNodeAddress: nAddress });
+const inserted = await talk.insertAbove({ childId: b, childAddress: addressOf(b), type: 'SITE', newNodePeer: nPeer, newNodeAddress: nAddress });
 place(inserted.id, nPeer, nAddress);
 assert.equal(await parentOf(b), inserted.id);
 assert.equal(await parentOf(inserted.id), a);
 assert.equal(await count(inserted.id), 1);
-assert.equal((await nPeer.describe(inserted.id))!.type, 'ORGANIZATION', 'the inserted node has the type it was given');
+assert.equal((await nPeer.describe(inserted.id))!.type, 'SITE', 'the inserted node has the type it was given');
 assert.equal(await count(a), aBefore, 'a gained N and lost b');
 
 // Rehome b under the top node. Counts follow; a cycle is refused; so is an unreachable old parent.

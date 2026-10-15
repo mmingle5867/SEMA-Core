@@ -27,15 +27,15 @@ const call = async (core: Running, method: 'GET' | 'POST', path: string, body?: 
   return { status: response.status, payload };
 };
 
-await A.nodes.accept({ id: '3', type: 'MACHINE' }); // the first node, created by hand on the first machine
+await A.nodes.accept({ id: '3', type: 'ORGANIZATION' }); // the first node, created by hand on the first machine
 
 // Create on another machine: A issues, B records, and B stores A's address beside its pointer.
-let r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'MACHINE', newNodeAddress: B.address });
+let r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'GROUP', newNodeAddress: B.address });
 assert.equal(r.status, 201); assert.equal(r.payload.id, '3-3'); assert.equal(r.payload.address, B.address);
-assert.deepEqual(await B.nodes.describe('3-3'), { id: '3-3', type: 'MACHINE', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
+assert.deepEqual(await B.nodes.describe('3-3'), { id: '3-3', type: 'GROUP', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
 // Create on this same machine (no address given).
-r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'USER' });
-assert.equal(r.payload.id, '3-4'); assert.equal(r.payload.type, 'USER');
+r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'GROUP' });
+assert.equal(r.payload.id, '3-4'); assert.equal(r.payload.type, 'GROUP');
 assert.equal((await A.nodes.describe('3-4'))!.parentAddress, A.address);
 // Under a node held by B, placed on C.
 r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3-3', parentAddress: B.address, type: 'GROUP', newNodeAddress: C.address });
@@ -43,7 +43,7 @@ assert.equal(r.payload.id, '3-3-3');
 
 // What A holds, and walking up from a node on C.
 r = await call(A, 'GET', '/v1/core/topology/local');
-assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.type, n.nextId]), [['3', 'MACHINE', '3-5'], ['3-4', 'USER', '3-4-3']]);
+assert.equal(r.payload.address, A.address); assert.deepEqual(r.payload.nodes.map((n: any) => [n.id, n.type, n.nextId]), [['3', 'ORGANIZATION', '3-5'], ['3-4', 'GROUP', '3-4-3']]);
 r = await call(A, 'GET', `/v1/core/topology/walk-up?nodeId=3-3-3&nodeAddress=${encodeURIComponent(C.address)}`);
 assert.deepEqual(r.payload.chain.map((n: any) => n.id), ['3-3', '3']);
 
@@ -66,7 +66,7 @@ assert.equal((await A.nodes.describe('3'))!.childCount, 1); // 3-4 remains; the 
 // Refusals come back as errors, not silent changes.
 r = await call(A, 'POST', '/v1/core/topology/rehome', { nodeId: '3-4', newParentId: '3-4' });
 assert.ok(r.status >= 400);
-r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'MACHINE', newNodeAddress: 'http://127.0.0.1:9' });
+r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3', type: 'GROUP', newNodeAddress: 'http://127.0.0.1:9' });
 assert.ok(r.status >= 400);
 // A create without a type is refused before any number is issued.
 r = await call(A, 'POST', '/v1/core/topology/create', { parentId: '3' });

@@ -10,14 +10,36 @@ import { encodeBase56 } from '../identity/base56.js';
  */
 /**
  * What a node is. Only the types Core's own rules treat differently are listed here:
- * ORGANIZATION is a company, with its own keyholders and its own seat limits; GROUP is a grouping inside
- * one (department, site, network); USER is a person and MACHINE is a PC or device, and each of those two
- * takes a seat. Finer detail (laptop, printer, sales department) is a description kept by Foundation Access.
- * Set once when the node is recorded and never changed: a different type is a new node with a new ID.
+ * ORGANIZATION is a company or a division of one, with its own keyholders and its own seat limits; GROUP groups
+ * people (department, team); SITE groups machines (site, building, network); USER is a person and MACHINE is a
+ * PC or device, and each of those two takes a seat. Finer detail (laptop, printer, sales department, room) is a
+ * description kept by Foundation Access. Set once when the node is recorded and never changed: a different type
+ * is a new node with a new ID.
  */
-export const NODE_TYPES = ['ORGANIZATION', 'GROUP', 'USER', 'MACHINE'] as const;
+export const NODE_TYPES = ['ORGANIZATION', 'GROUP', 'SITE', 'USER', 'MACHINE'] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 export const isNodeType = (value: unknown): value is NodeType => NODE_TYPES.includes(value as NodeType);
+const TYPE_LIST = 'ORGANIZATION, GROUP, SITE, USER or MACHINE';
+
+/**
+ * Which types may sit directly under which. A GROUP and a SITE are kept apart because the parent means different
+ * things on each side: on the people side it gives a person their permissions, on the physical side it gives a
+ * machine its ceiling. A user or a machine has no children in the tree.
+ */
+export const MAY_HOLD: Readonly<Record<NodeType, readonly NodeType[]>> = {
+  ORGANIZATION: ['ORGANIZATION', 'GROUP', 'SITE', 'USER'],
+  GROUP: ['GROUP', 'USER'],
+  SITE: ['SITE', 'MACHINE'],
+  USER: [],
+  MACHINE: [],
+};
+export function mayHold(parent: NodeType, child: NodeType) { return MAY_HOLD[parent].includes(child); }
+const a = (type: NodeType, capital = false) => `${type === 'ORGANIZATION' ? (capital ? 'An' : 'an') : (capital ? 'A' : 'a')} ${type}`;
+export function requireMayHold(parent: { id: string; type: NodeType }, child: { childId?: string; type: NodeType }) {
+  if (mayHold(parent.type, child.type)) return;
+  const allowed = MAY_HOLD[parent.type];
+  throw new Error(`${a(child.type, true)} cannot sit under ${a(parent.type)}${child.childId ? ` (${child.childId} under ${parent.id})` : ''}. ${allowed.length ? `${a(parent.type, true)} may hold ${allowed.join(', ')}` : `${a(parent.type, true)} has no children in the tree`}`);
+}
 
 /**
  * One direct child, as its parent believes it to be. The child's own pointer is the truth: when the two
@@ -115,7 +137,7 @@ const segments = (basis: string) => basis.split('-').length;
 const validId = (id: string) => Boolean(id) && id.split('-').every(Boolean);
 const entry = (child: { childId: string; type: NodeType; address?: string }): ChildEntry => {
   if (!validId(child.childId)) throw new Error('A child ID must be hyphen-separated non-empty segments');
-  if (!isNodeType(child.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+  if (!isNodeType(child.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
   return { childId: child.childId, type: child.type, ...(child.address ? { address: child.address } : {}) };
 };
 
@@ -125,7 +147,7 @@ export class LocalNodes {
   /** Records a node on this machine from an ID that another Core, or the central authority, issued. */
   async accept(input: { id: string; type: NodeType; parentId?: string; parentAddress?: string }) {
     if (!validId(input.id)) throw new Error('A node ID must be hyphen-separated non-empty segments');
-    if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+    if (!isNodeType(input.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
     if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
     const node: LocalNode = { id: input.id, type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'ACTIVE' };
     await this.store.insert(node);
@@ -140,7 +162,7 @@ export class LocalNodes {
    */
   async acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) {
     if (!validId(input.id)) throw new Error('A node ID must be hyphen-separated non-empty segments');
-    if (!isNodeType(input.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+    if (!isNodeType(input.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
     if (!input.replacementId || input.replacementId === input.id) throw new Error('A lost node needs a different node as its replacement');
     const node: LocalNode = { id: input.id, type: input.type, parentId: input.replacementId, ...(input.replacementAddress ? { parentAddress: input.replacementAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'RETIRED' };
     await this.store.insert(node);
@@ -178,9 +200,10 @@ export class LocalNodes {
    * child's own Core has accepted it. If the child is never recorded, the entry is one too many, never one too few.
    */
   async issueChildId(id: string, child: { type: NodeType; address?: string }) {
-    if (!isNodeType(child.type)) throw new Error('A node type must be ORGANIZATION, GROUP, USER or MACHINE');
+    if (!isNodeType(child.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
     const value = await this.store.mutate(id, (node) => {
       this.requireActive(node);
+      requireMayHold(node, child);
       const issued = node.issued + BigInt(1);
       const childId = `${node.basis}-${encodeBase56(issued)}`;
       return { node: { ...node, issued }, result: childId, addChildren: [entry({ childId, type: child.type, address: child.address })] };
@@ -218,10 +241,18 @@ export class LocalNodes {
     });
   }
 
-  /** Adds children to a node's list, or updates entries already there. Only an active node gains children. */
+  /**
+   * Adds children to a node's list, or updates entries already there. Only an active node gains children, and only
+   * of a type it may hold. Every way a node gets a parent passes through here or through issueChildId, so this is
+   * where the rule of which types sit under which is kept.
+   */
   async addChildren(id: string, children: Array<{ childId: string; type: NodeType; address?: string }>) {
     const entries = children.map(entry);
     if (entries.some((child) => child.childId === id)) throw new Error('A node cannot be its own child');
+    const parent = await this.store.get(id);
+    if (!parent) throw new Error(`Node does not exist on this Core: ${id}`);
+    this.requireActive(parent);
+    for (const child of entries) requireMayHold(parent, child);
     await this.store.addChildren(id, entries);
     return { childCount: (await this.store.children(id)).length };
   }

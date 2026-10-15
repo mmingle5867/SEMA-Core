@@ -16,12 +16,12 @@ const nodesA = new LocalNodes(new InMemoryLocalNodeStore()), nodesB = new LocalN
 const A = await startCore('3', nodesA), B = await startCore('4', nodesB), C = await startCore('5', nodesC);
 const talk = new Conversations(new HttpPeerDirectory({ credentials }));
 
-await nodesA.accept({ id: '3', type: 'MACHINE' }); // the central authority's top node lives on A
+await nodesA.accept({ id: '3', type: 'ORGANIZATION' }); // the central authority's top node lives on A
 
 // Create across machines: A issues, B records. B stores A's address beside its pointer.
-const onB = await talk.createNode({ parentId: '3', parentAddress: A.address, type: 'MACHINE', newNodePeer: new HttpNodePeer(B.address, credentials) });
+const onB = await talk.createNode({ parentId: '3', parentAddress: A.address, type: 'GROUP', newNodePeer: new HttpNodePeer(B.address, credentials) });
 assert.equal(onB.id, '3-3');
-assert.deepEqual(await nodesB.describe('3-3'), { id: '3-3', type: 'MACHINE', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
+assert.deepEqual(await nodesB.describe('3-3'), { id: '3-3', type: 'GROUP', parentId: '3', parentAddress: A.address, basis: '3-3', childCount: 0, status: 'ACTIVE' });
 assert.equal((await nodesA.describe('3'))!.childCount, 1);
 const onC = await talk.createNode({ parentId: '3-3', parentAddress: B.address, type: 'USER', newNodePeer: new HttpNodePeer(C.address, credentials) });
 assert.equal(onC.id, '3-3-3');
