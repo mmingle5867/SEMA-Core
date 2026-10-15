@@ -172,6 +172,9 @@ model SemaLocalNode {
   maxSegments          Int?
   maxSegmentLength     Int?
   maxLastSegmentLength Int?
+  /// A basis fetched early, ready to take over when the counter would pass switchAt. Both set, or neither.
+  nextBasis            String?
+  switchAt             BigInt?
   status     String   @default("ACTIVE")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

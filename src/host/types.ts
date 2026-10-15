@@ -74,3 +74,21 @@ export interface CoreHostAuthorization {
 }
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }
+
+/** The report of the check that fetches a ready basis before a node's counter reaches its organization's length limit. */
+export interface KeyLimitCheck {
+  checkedAt: string;
+  note?: string;
+  nodes: Array<{
+    nodeId: string;
+    basis: string;
+    issued: string;
+    /** NO_LIMIT: none applies. OK: below nine tenths. READY: a ready basis waits. NEEDS_BASIS: near the limit and none could be fetched. OVER_LIMIT: past the limit with none, still issuing. UNCHECKED: the check could not run for this node. */
+    state: 'NO_LIMIT' | 'OK' | 'READY' | 'NEEDS_BASIS' | 'OVER_LIMIT' | 'UNCHECKED';
+    limitLength?: number;
+    maxValue?: string;
+    nextBasis?: string;
+    switchAt?: string;
+    reason?: string;
+  }>;
+}

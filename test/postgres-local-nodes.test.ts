@@ -29,6 +29,15 @@ try {
   // How an ID this Core issued was recorded, read back by ID; an ID it never issued has no record.
   assert.deepEqual(await host.issuedIdentifier('3-J-3'), { id: '3-J-3', reservationId: (await host.issuedIdentifier('3-J-3'))!.reservationId, installationId: '3-J', localValue: BigInt(1), localCode: '3', typeCode: undefined, status: 'RESERVED', metadata: {} });
   assert.equal(await host.issuedIdentifier('3-J-9'), undefined);
+  // A ready basis on the machine node takes over inside the same statement that reserves ordinary IDs.
+  const machineNodes = new LocalNodes(new PrismaLocalNodeStore(prisma));
+  assert.equal((await machineNodes.setNextBasis('3-J', { basis: '3-Q', switchAt: 2 })).nextBasis, '3-Q');
+  assert.equal((await host.reserveIdentifiers({ count: 1, metadata: {} })).identifiers[0].id, '3-J-4', 'value 2 is still within the limit');
+  assert.deepEqual((await host.reserveIdentifiers({ count: 2, metadata: {} })).identifiers.map((identifier) => identifier.id), ['3-Q-3', '3-Q-4'], 'passing the limit switches to the ready basis first');
+  const switched = (await machineNodes.describe('3-J'))!;
+  assert.deepEqual([switched.id, switched.basis, switched.nextBasis, switched.switchAt], ['3-J', '3-Q', undefined, undefined], 'the node keeps its ID; the ready basis is used up');
+  assert.equal((await host.issuedIdentifier('3-Q-3'))!.installationId, '3-Q', 'an ID records the basis it came from');
+  assert.equal((await machineNodes.issueChildId('3-J', { type: 'USER' }).catch((error: Error) => error.message)), 'A USER cannot sit under a MACHINE. A MACHINE has no children in the tree', 'a machine still issues no children');
 
   // Back to an empty database for the rest: the first node of a new system.
   await prisma.$executeRaw`DELETE FROM "sema_issued_identifiers"`;

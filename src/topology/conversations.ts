@@ -16,6 +16,7 @@ export interface NodePeer {
   removeChild(id: string, childId: string): Promise<{ removed: boolean; childCount: number }>;
   setChildListComplete(id: string, complete: boolean): Promise<{ childListComplete: boolean }>;
   setKeyLimits(id: string, limits: KeyLimits | null): Promise<NodeDescription>;
+  setNextBasis(id: string, input: { basis: string; switchAt: string }): Promise<NodeDescription>;
   retire(id: string): Promise<{ parentId?: string; parentAddress?: string; children: ChildEntry[]; childListComplete: boolean }>;
   acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }): Promise<NodeDescription>;
 }
@@ -332,6 +333,26 @@ export class Conversations {
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */
   async setKeyLimits(input: { nodeId: string; nodeAddress?: string; limits: KeyLimits | null }) {
     return (await this.mustPeer(input.nodeId, 'The organization node', input.nodeAddress)).setKeyLimits(input.nodeId, input.limits);
+  }
+
+  /**
+   * Fetches a basis early and keeps it ready on the node, to take over when its counter would pass `switchAt`. The
+   * issuer is chosen as for a roll-up: an ancestor inside the node's organization, the highest reachable one, or
+   * outside it when the basis is over the organization's segment limit. Unlike a roll-up the new basis need not be
+   * shorter: it renews the counter, it does not shorten the ID. A node that already has one keeps it.
+   */
+  async prepareNextBasis(input: { nodeId: string; nodeAddress?: string; switchAt: bigint }) {
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    if (typeof node === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
+    if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
+    if (node.nextBasis) return { issuerId: undefined, nextBasis: node.nextBasis, switchAt: node.switchAt, alreadyReady: true as const };
+    const { chain } = await this.walkUp(input.nodeId, input.nodeAddress);
+    const candidates = rollUpCandidates(node, chain).filter((ancestor) => ancestor.status === 'ACTIVE');
+    if (!candidates.length) throw new Error('No reachable ancestor inside the node\'s organization can issue a ready basis');
+    const issuer = candidates.reduce((best, ancestor) => (segments(ancestor.basis) < segments(best.basis) ? ancestor : best));
+    const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
+    const after = await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setNextBasis(input.nodeId, { basis: fresh.value, switchAt: input.switchAt.toString() });
+    return { issuerId: issuer.id, nextBasis: after.nextBasis, switchAt: after.switchAt, alreadyReady: false as const };
   }
 
   /** An administrator says whether a node's list of children is complete. */

@@ -56,4 +56,7 @@ const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, loc
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname, port, applicationClients: clients });
 console.log(`SEMA Core v${SEMA_CORE_VERSION} listening on http://${hostname}:${port}`);
+// How often to look for nodes nearing their organization's length limit and fetch a ready basis. 0 turns it off.
+const keyLimitCheckSeconds = Number(process.env.SEMA_CORE_KEY_LIMIT_CHECK_SECONDS ?? 300);
+host.startKeyLimitChecks(Number.isFinite(keyLimitCheckSeconds) ? keyLimitCheckSeconds * 1000 : 300_000);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));

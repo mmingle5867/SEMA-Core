@@ -10,6 +10,7 @@ stored beside each parent pointer.
 | --- | --- |
 | `SEMA_CORE_ADDRESS` | The stable name other Cores use to reach this one, e.g. `http://neo-main:4310`. Stored beside every pointer to a node held here. Leave unset on a single-machine setup. |
 | `SEMA_CORE_PEER_APPLICATION_KEY`, `SEMA_CORE_PEER_SECRET` | The shared application credential presented to other Cores. It must be registered in each Core's `SEMA_APPLICATION_CLIENTS_JSON`. Later replaced by per-machine keys. |
+| `SEMA_CORE_KEY_LIMIT_CHECK_SECONDS` | How often the key-limit check runs (see "Key limits"). Default 300 seconds; 0 turns it off. Optional. |
 
 Without the peer credential a Core still works alone; the conversation routes answer that they are not configured.
 
@@ -179,4 +180,10 @@ What uses them today:
 
 - **A roll-up may leave the organization** only when the node's basis has more segments than `maxSegments`. Then any reachable ancestor may issue, a parent organization or above. An organization node uses its own limit, so it can roll up only when over it.
 
-Not built yet: the two length limits are stored but nothing acts on them. The next step is a ready next basis fetched in the background, so a node switches to it when its counter reaches the length limit and never waits; at the limit with no ready basis it keeps issuing and the Console flags it.
+- **The length limits decide when a node renews its counter.** A machine node uses `maxLastSegmentLength` (it issues ordinary IDs), falling back to `maxSegmentLength`; every other node uses `maxSegmentLength`. A limit of L characters lets a counter reach 56^L − 1.
+
+**The ready next basis.** A check runs on a timer (`SEMA_CORE_KEY_LIMIT_CHECK_SECONDS`, default 300) and on request. For each active node this Core holds, it walks up to the node's organization, reads the length limit, and once the counter reaches nine tenths of it, asks an ancestor for a new basis, chosen as for a roll-up (inside the organization unless the basis is over `maxSegments`). The node keeps it as `nextBasis`, with `switchAt` set to the limit. When the counter would pass `switchAt`, the node switches to the ready basis in the same step that issues the next value, child IDs, bases for others and ordinary IDs alike, so nothing waits. The node keeps its own ID; what was left under the old basis is never used; a roll-up drops a ready basis meant for the old one. A node holds one ready basis at most.
+
+A node past its limit with no ready basis keeps issuing: a limit is a preference. The check reports each node as `NO_LIMIT`, `OK`, `READY`, `NEEDS_BASIS` (near the limit, none could be fetched), `OVER_LIMIT` (past it, none, still issuing) or `UNCHECKED`, with the reason. `GET /v1/core/topology/key-limit-status` returns the last report (kept in memory, rebuilt by every run; `core.topology.read`); `POST /v1/core/topology/key-limit-check` runs it now (`core.topology.write`). Fetching a ready basis is audited.
+
+An ID records the basis it came from, so after a switch the issued-ID record names the new basis. Adopt-issued now checks only that this Core issued the ID.
