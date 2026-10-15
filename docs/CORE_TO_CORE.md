@@ -174,6 +174,8 @@ Pointing a lost node's children at another node is a powerful act. It has its ow
 
 ## Key limits
 
+Why: on one machine an ID's length makes almost no difference, but IDs go with every transaction between computers, several in each message, so every extra character is repeated in every message on every link. Keeping IDs short is one of the cheapest ways to cut the data sent between machines. Uniqueness never depends on it.
+
 An organization may set optional limits on the IDs issued inside it, on its organization node: `maxSegments` (2 to 64), `maxSegmentLength` (1 to 12 characters) and `maxLastSegmentLength` (1 to 20, at least `maxSegmentLength`). They are a preference and never needed for uniqueness. Nothing set means no limit. `POST /v1/core/topology/key-limits` sets, changes or clears them (null, or leaving all three out, clears them); it needs `core.topology.write`. They are stored on the organization node and shown when the node is described, so another Core walking up through it can read them.
 
 What uses them today:
