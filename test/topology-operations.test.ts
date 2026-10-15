@@ -63,6 +63,15 @@ r = await call(A, 'POST', '/v1/core/topology/remove', { nodeId: '3-3', nodeAddre
 assert.equal(r.status, 200); assert.equal((await B.nodes.describe('3-3'))!.status, 'RETIRED');
 assert.equal((await A.nodes.describe('3'))!.childCount, 1); // 3-4 remains; the removed node's slot is gone
 
+// Key limits on an organization node: set through the topology route, seen when the node is described, cleared with null.
+r = await call(A, 'POST', '/v1/core/topology/key-limits', { nodeId: '3', maxSegments: 5, maxSegmentLength: 3 });
+assert.equal(r.status, 200); assert.deepEqual(r.payload.keyLimits, { maxSegments: 5, maxSegmentLength: 3 });
+assert.deepEqual((await A.nodes.describe('3'))!.keyLimits, { maxSegments: 5, maxSegmentLength: 3 });
+assert.equal((await call(A, 'POST', '/v1/core/topology/key-limits', { nodeId: '3', maxSegments: 0 })).status, 400, 'a limit out of range is refused');
+assert.equal((await call(A, 'POST', '/v1/core/topology/key-limits', { nodeId: '3-4', maxSegments: 4 })).status, 400, 'only an organization node holds limits');
+r = await call(A, 'POST', '/v1/core/topology/key-limits', { nodeId: '3', maxSegments: null });
+assert.equal(r.status, 200); assert.equal(r.payload.keyLimits, undefined, 'null clears them');
+
 // Refusals come back as errors, not silent changes.
 r = await call(A, 'POST', '/v1/core/topology/rehome', { nodeId: '3-4', newParentId: '3-4' });
 assert.ok(r.status >= 400);

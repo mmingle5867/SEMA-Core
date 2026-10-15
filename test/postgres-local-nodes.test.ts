@@ -65,6 +65,11 @@ try {
 
   assert.equal((await nodes.listWithNextId()).find((node) => node.id === '3-T1')!.nextId, '3-T1-3');
 
+  // Key limits are stored on an organization node, read back, kept through other changes, and cleared.
+  assert.deepEqual((await nodes.setKeyLimits('3-T1', { maxSegments: 4, maxLastSegmentLength: 6 })).keyLimits, { maxSegments: 4, maxLastSegmentLength: 6 });
+  assert.deepEqual((await nodes.describe('3-T1'))!.keyLimits, { maxSegments: 4, maxLastSegmentLength: 6 });
+  assert.equal((await nodes.describe('3-T2'))!.keyLimits, undefined);
+
   // Changes keep the type: issuing, moving, rolling up and retiring.
   assert.deepEqual(await nodes.issueChildId('3-T1', { type: 'GROUP', address: 'http://child.example:4310' }), { value: '3-T1-3', childCount: 1 });
   assert.deepEqual(await nodes.children('3-T1'), [{ childId: '3-T1-3', type: 'GROUP', address: 'http://child.example:4310' }], 'an issued child is on the list in the same step');
@@ -81,7 +86,7 @@ try {
   await nodes.setChildListComplete('3-T2', true);
   assert.equal((await nodes.describe('3-T2'))!.childListIncomplete, undefined);
   assert.deepEqual(await nodes.retire('3-T1'), { parentId: '3', parentAddress: 'http://parent.example:4310', children: [{ childId: '3-T3', type: 'USER' }], childListComplete: true });
-  assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, status: 'RETIRED' }, 'a retired node keeps its list');
+  assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, keyLimits: { maxSegments: 4, maxLastSegmentLength: 6 }, status: 'RETIRED' }, 'a retired node keeps its list, and its limits survived every change');
   await assert.rejects(() => nodes.addChildren('3-T1', [{ childId: '3-T8', type: 'USER' }]), /retired/);
 
   // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
