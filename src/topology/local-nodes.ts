@@ -53,7 +53,9 @@ export interface ChildEntry {
 }
 
 /**
- * Optional limits an organization sets on the IDs issued inside it: a preference, never needed for uniqueness.
+ * Optional limits an organization sets on the IDs issued inside it: a preference, never needed for uniqueness. They
+ * exist to keep IDs short, which matters little on one machine but a great deal between machines: IDs travel with
+ * every transaction, several in each message, so every extra character is sent again and again.
  * `maxSegments` is how many hyphen segments a basis may have before a roll-up may go outside the organization.
  * `maxSegmentLength` is how many characters a value issued for a node (a child or a new basis) should have, and
  * `maxLastSegmentLength` the same for values issued as ordinary IDs, the last segment, which may be longer.

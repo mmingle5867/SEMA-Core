@@ -90,5 +90,7 @@ export interface KeyLimitCheck {
     nextBasis?: string;
     switchAt?: string;
     reason?: string;
+    /** Information, not warnings: where the basis, or a ready basis, breaks the organization's limits because of segments issued under a parent's rules. */
+    notes?: string[];
   }>;
 }

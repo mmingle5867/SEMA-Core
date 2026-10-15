@@ -62,10 +62,41 @@ const insideOrganization = (node: NodeDescription, chain: ReachedNode[]) => {
  * than that organization's segment limit: then any reachable ancestor, a parent organization or above. The
  * organization is the node itself when it is an organization node, otherwise its nearest organization ancestor.
  */
+const organizationOf = (node: NodeDescription, chain: ReachedNode[]) => (node.type === 'ORGANIZATION' ? node : chain.find((ancestor) => ancestor.type === 'ORGANIZATION'));
 const rollUpCandidates = (node: NodeDescription, chain: ReachedNode[]) => {
-  const organization = node.type === 'ORGANIZATION' ? node : chain.find((ancestor) => ancestor.type === 'ORGANIZATION');
-  const limit = organization?.keyLimits?.maxSegments;
+  const limit = organizationOf(node, chain)?.keyLimits?.maxSegments;
   return limit !== undefined && segments(node.basis) > limit ? chain : insideOrganization(node, chain);
+};
+
+/**
+ * Where a basis breaks the organization's limits, in words. The segments already there may have come from above,
+ * issued under a parent organization's rules; nothing inside the organization can change them, so this is a note,
+ * never a refusal. The last segment of a basis is a value issued for a node, so maxSegmentLength applies to it too.
+ */
+export function limitNotes(basis: string, limits?: KeyLimits): string[] {
+  if (!limits) return [];
+  const parts = basis.split('-'), notes: string[] = [];
+  if (limits.maxSegments !== undefined && parts.length > limits.maxSegments) notes.push(`The basis ${basis} has ${parts.length} segments, more than the organization's limit of ${limits.maxSegments}`);
+  const long = limits.maxSegmentLength === undefined ? [] : parts.filter((part) => part.length > limits.maxSegmentLength!);
+  if (long.length) notes.push(`The basis ${basis} has ${long.length === 1 ? 'a segment' : 'segments'} (${long.join(', ')}) longer than the organization's limit of ${limits.maxSegmentLength} characters, issued under the rules of the node that issued it`);
+  return notes;
+}
+
+/**
+ * Chooses the ancestor to issue a new basis. The new basis will be that ancestor's basis plus one value from its
+ * counter, so the ancestors are ranked by what they would give: first one whose basis leaves room within the
+ * organization's limits (the new basis would have no more segments than allowed, and no segment of the ancestor's
+ * basis is longer than allowed), then the fewest segments, then the fewest characters. The value the ancestor will
+ * add is not known until it is issued; any note about it is made afterwards.
+ */
+const chooseIssuer = (candidates: ReachedNode[], limits?: KeyLimits) => {
+  const fits = (ancestor: ReachedNode) => (limits?.maxSegments === undefined || segments(ancestor.basis) + 1 <= limits.maxSegments)
+    && (limits?.maxSegmentLength === undefined || ancestor.basis.split('-').every((part) => part.length <= limits.maxSegmentLength!));
+  const rank = (ancestor: ReachedNode) => [fits(ancestor) ? 0 : 1, segments(ancestor.basis), ancestor.basis.length] as const;
+  return candidates.reduce((best, ancestor) => {
+    const [a, b] = [rank(ancestor), rank(best)];
+    return a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2]))) ? ancestor : best;
+  });
 };
 
 /**
@@ -349,10 +380,12 @@ export class Conversations {
     const { chain } = await this.walkUp(input.nodeId, input.nodeAddress);
     const candidates = rollUpCandidates(node, chain).filter((ancestor) => ancestor.status === 'ACTIVE');
     if (!candidates.length) throw new Error('No reachable ancestor inside the node\'s organization can issue a ready basis');
-    const issuer = candidates.reduce((best, ancestor) => (segments(ancestor.basis) < segments(best.basis) ? ancestor : best));
+    const limits = organizationOf(node, chain)?.keyLimits;
+    const issuer = chooseIssuer(candidates, limits);
     const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
     const after = await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setNextBasis(input.nodeId, { basis: fresh.value, switchAt: input.switchAt.toString() });
-    return { issuerId: issuer.id, nextBasis: after.nextBasis, switchAt: after.switchAt, alreadyReady: false as const };
+    const notes = after.nextBasis === fresh.value ? limitNotes(fresh.value, limits) : [];
+    return { issuerId: issuer.id, nextBasis: after.nextBasis, switchAt: after.switchAt, alreadyReady: false as const, ...(notes.length ? { notes } : {}) };
   }
 
   /** An administrator says whether a node's list of children is complete. */
@@ -377,12 +410,16 @@ export class Conversations {
     if (!candidates.length) throw new Error(node.type === 'ORGANIZATION'
       ? 'An organization node has no ancestor inside its own organization to issue a new basis. It may go to a parent organization only when its basis has more segments than its own segment limit (maxSegments)'
       : 'No reachable ancestor inside the node\'s organization can issue a new basis');
+    const limits = organizationOf(node, chain)?.keyLimits;
+    const shorter = candidates.filter((ancestor) => segments(ancestor.basis) + 1 < segments(node.basis));
     const issuer = input.issuerId
       ? candidates.find((ancestor) => ancestor.id === input.issuerId)
-      : candidates.reduce((best, ancestor) => (segments(ancestor.basis) < segments(best.basis) ? ancestor : best));
+      : (shorter.length ? chooseIssuer(shorter, limits) : candidates[0]);
     if (!issuer) throw new Error("The issuer must be a reachable ancestor inside the node's own organization, unless its basis is over the organization's segment limit (maxSegments)");
     if (segments(issuer.basis) + 1 >= segments(node.basis)) throw new Error('A roll-up must make the basis shorter');
     const fresh = await (await this.mustPeer(issuer.id, 'The issuer', issuer.address)).issueBasis(issuer.id);
-    return { issuerId: issuer.id, ...(await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setBasis(input.nodeId, fresh.value)) };
+    const set = await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setBasis(input.nodeId, fresh.value);
+    const notes = limitNotes(set.basis, limits);
+    return { issuerId: issuer.id, ...set, ...(notes.length ? { notes } : {}) };
   }
 }
