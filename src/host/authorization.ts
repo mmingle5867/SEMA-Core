@@ -1,3 +1,4 @@
+import { CoreHostUnavailableError } from './errors.js';
 import type { CoreHostAuthorization } from './types.js';
 
 /** Local-first starter policy. Production adapters replace this with Core policy evaluation. */
@@ -19,10 +20,19 @@ export class FoundationPolicyAuthorization implements CoreHostAuthorization {
   }
   private async evaluate(actorId: string | null, resource: string) {
     if (!actorId || !this.clients.has(actorId)) return false;
-    const response = await fetch(`${this.policyUrl}/v1/access/policy/evaluate`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-sema-access-policy-key': this.policyKey },
-      body: JSON.stringify({ applicationKey: actorId, operation: resource }),
-    });
+    // A permission that cannot be checked is refused, and the caller is told why in plain words, not with a bare error.
+    let response: Response;
+    try {
+      response = await fetch(`${this.policyUrl}/v1/access/policy/evaluate`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-sema-access-policy-key': this.policyKey },
+        body: JSON.stringify({ applicationKey: actorId, operation: resource }),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      throw new CoreHostUnavailableError(`Foundation Access is not reachable at ${this.policyUrl}, so Core cannot check permissions. Start Foundation Access`);
+    }
+    if (response.status === 401 || response.status === 403) throw new CoreHostUnavailableError("Foundation Access refused Core's policy key, so Core cannot check permissions. Check SEMA_POLICY_KEY in Core's .env against Foundation Access");
+    if (response.status >= 500) throw new CoreHostUnavailableError(`Foundation Access answered with an error (${response.status}), so Core cannot check permissions`);
     if (!response.ok) return false;
     const value = await response.json() as { allowed?: boolean };
     return value.allowed === true;

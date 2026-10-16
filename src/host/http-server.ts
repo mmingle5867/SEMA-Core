@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostValidationError } from './errors.js';
+import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostUnavailableError, CoreHostValidationError } from './errors.js';
 import type { CoreHostSettings } from './types.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import { SemaCoreHost } from './sema-core-host.js';
@@ -67,6 +67,7 @@ function classify(error: unknown): { status: number; code: string; message: stri
   if (error instanceof HttpRequestError) return { status: error.status, code: error.code, message: error.message };
   if (error instanceof CoreHostAuthorizationError) return { status: 403, code: 'FORBIDDEN', message: error.message };
   if (error instanceof CoreHostLockedError) return { status: 423, code: 'LOCKED', message: error.message };
+  if (error instanceof CoreHostUnavailableError) return { status: 503, code: 'UNAVAILABLE', message: error.message };
   if (error instanceof CoreHostValidationError) return { status: 400, code: 'INVALID_REQUEST', message: error.message };
   const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
   // Errors raised by custom authorization or store implementations are still recognised by message.

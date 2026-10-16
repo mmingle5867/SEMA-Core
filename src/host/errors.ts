@@ -7,6 +7,14 @@ export class CoreHostValidationError extends Error {
 }
 
 /** Raised when the caller is not allowed to perform a Core Host operation. Maps to HTTP 403. */
+/** Something Core depends on cannot be reached, such as Foundation Access for permissions. Says which, plainly. */
+export class CoreHostUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoreHostUnavailableError';
+  }
+}
+
 /** This Core is shut down: its own machine node is suspended. It refuses changes and work, and stays readable. */
 export class CoreHostLockedError extends Error {
   constructor(message: string) {
