@@ -5,4 +5,4 @@ node_modules
 coverage/
 *.tsbuildinfo
 # Private keys never leave the machine
-keys/
+/keys/
