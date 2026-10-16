@@ -21,13 +21,11 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
   await assert.rejects(() => nodes.issueBasis(site), /suspended/);
   assert.equal((await nodes.children(site)).length, 1, 'a suspended node stays readable');
 
-  // The machine under the site has not heard yet; it locks at its next check-in, learning it from its parent.
-  await nodes.issueBasis(pc);
-  const checked = await talk.checkIn({ nodeId: pc });
-  assert.equal('locked' in checked && checked.locked, true);
+  // The notice went straight down the list: the machine under the site is locked already, learning it from above.
+  assert.deepEqual(suspended.notice, { told: [pc], unreachable: [], failed: [] });
   assert.deepEqual([(await nodes.describe(pc))!.shutdown!.nodeId, (await nodes.describe(pc))!.shutdown!.via], [site, 'PARENT']);
   await assert.rejects(() => nodes.issueBasis(pc), /Node is suspended: 3-3-3 \(because 3-3 is suspended\)/);
-  assert.equal('locked' in (await talk.checkIn({ nodeId: pc })), false, 'checking in again changes nothing');
+  assert.equal('locked' in (await talk.checkIn({ nodeId: pc })), false, 'its next check-in agrees, so nothing changes');
   assert.equal((await talk.checkIn({ nodeId: site })).state, 'CHECKED_IN');
   assert.equal((await nodes.describe(site))!.shutdown!.via, 'ORDER', 'a lock from an order is not replaced by the parent\'s report');
   await talk.checkIn({ nodeId: person });
@@ -41,13 +39,41 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
   // Resuming the machine does nothing while its ancestor is suspended: resume the site instead.
   assert.equal((await talk.resume({ nodeId: pc })).stillLockedBy, site);
   const resumed = await talk.resume({ nodeId: site });
-  assert.deepEqual([resumed.parentCleared, resumed.nodeCleared], [true, true]);
+  assert.deepEqual([resumed.parentCleared, resumed.nodeCleared, resumed.stillLockedBy], [true, true, undefined]);
+  assert.deepEqual(resumed.notice, { told: [pc], unreachable: [], failed: [] }, 'the news goes down too');
   assert.equal((await nodes.describe(site))!.shutdown, undefined);
   assert.equal((await nodes.children('3')).find((child) => child.childId === site)!.suspension, undefined);
   await nodes.issueBasis(site);
-  const after = await talk.checkIn({ nodeId: pc });
-  assert.equal('unlocked' in after && after.unlocked, true, 'the machine unlocks at its next check-in');
   await nodes.issueBasis(pc);
+}
+
+// Suspensions inside suspensions: each node follows the nearest suspension above it, and resuming one never frees what another still holds.
+{
+  const nodes = new LocalNodes(new InMemoryLocalNodeStore());
+  const talk = new Conversations({ find: async () => nodes });
+  await nodes.accept({ id: '3', type: 'ORGANIZATION' });
+  const make = async (parentId: string, type: 'SITE' | 'MACHINE') => (await talk.createNode({ parentId, type, newNodePeer: nodes })).id;
+  const building = await make('3', 'SITE'), floor = await make(building, 'SITE'), pc = await make(floor, 'MACHINE'), printer = await make(building, 'MACHINE');
+  const lockOf = async (id: string) => { const shutdown = (await nodes.describe(id))!.shutdown; return shutdown ? `${shutdown.nodeId}/${shutdown.via}` : 'free'; };
+
+  await talk.suspend({ nodeId: floor, reason: 'Floor rewiring' });
+  assert.deepEqual([await lockOf(floor), await lockOf(pc), await lockOf(printer)], [`${floor}/ORDER`, `${floor}/PARENT`, 'free']);
+  const whole = await talk.suspend({ nodeId: building, reason: 'Building closed' });
+  assert.deepEqual(whole.notice.told, [printer], 'the floor has its own suspension, so it and everything below it are left alone');
+  assert.deepEqual([await lockOf(building), await lockOf(floor), await lockOf(pc), await lockOf(printer)], [`${building}/ORDER`, `${floor}/ORDER`, `${floor}/PARENT`, `${building}/PARENT`]);
+
+  // Resuming the building: the printer is free; the floor is still suspended, so the PC stays locked.
+  const reopened = await talk.resume({ nodeId: building });
+  assert.deepEqual(reopened.notice!.told, [printer]);
+  assert.deepEqual([await lockOf(building), await lockOf(floor), await lockOf(pc), await lockOf(printer)], ['free', `${floor}/ORDER`, `${floor}/PARENT`, 'free']);
+
+  // The other order: suspend the building again, then resume the floor. The floor is now held by the building, and so is the PC.
+  await talk.suspend({ nodeId: building, reason: 'Building closed again' });
+  const floorBack = await talk.resume({ nodeId: floor });
+  assert.equal(floorBack.stillLockedBy, building, 'resuming the floor does not free it while the building is suspended');
+  assert.deepEqual([await lockOf(floor), await lockOf(pc)], [`${building}/PARENT`, `${building}/PARENT`]);
+  await talk.resume({ nodeId: building });
+  assert.deepEqual([await lockOf(building), await lockOf(floor), await lockOf(pc), await lockOf(printer)], ['free', 'free', 'free', 'free']);
 }
 
 // A node whose machine is offline is still suspended: its parent marks it, and the machine locks when it comes back.
@@ -74,8 +100,17 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
   laptopOnline = true;
   assert.equal((await talk.checkIn({ nodeId: '3-3', nodeAddress: 'http://laptop' }) as { unlocked?: true }).unlocked, true);
 
-  // A top node has no parent to mark it, so an offline top node cannot be suspended from outside.
+  // Suspending the site: the notice reaches the laptop on its own Core when it answers, and lists it when it does not.
+  const reached = await talk.suspend({ nodeId: '3', reason: 'Site audit' });
+  assert.deepEqual(reached.notice, { told: ['3-3'], unreachable: [], failed: [] });
+  assert.equal((await laptop.describe('3-3'))!.shutdown!.nodeId, '3');
+  await talk.resume({ nodeId: '3' });
+  assert.equal((await laptop.describe('3-3'))!.shutdown, undefined);
   laptopOnline = false;
+  assert.deepEqual((await talk.suspend({ nodeId: '3', reason: 'Site audit' })).notice, { told: [], unreachable: ['3-3'], failed: [] }, 'a machine that does not answer is listed, and learns at its next check-in');
+  await talk.resume({ nodeId: '3' });
+
+  // A top node has no parent to mark it, so an offline top node cannot be suspended from outside.
   await assert.rejects(() => talk.suspend({ nodeId: '9', nodeAddress: 'http://laptop', reason: 'x' }), /could not be reached/);
 }
 

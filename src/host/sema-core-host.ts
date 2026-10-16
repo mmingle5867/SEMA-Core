@@ -513,13 +513,13 @@ export class SemaCoreHost {
   topologySuspend(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string; reason: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId'), reason = this.text(input.reason, 'reason');
     const parentId = input.parentId === undefined || input.parentId === null || input.parentId === '' ? undefined : this.text(input.parentId, 'parentId');
-    return this.conversation(context, 'core.topology.node-suspended', [nodeId], (talk) => talk.suspend({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}), reason, ...(context.actorId ? { by: context.actorId } : {}) }), (result) => ({ reason, parentMarked: result.parentMarked, nodeLocked: result.nodeLocked }), 'core.authority.suspend', true);
+    return this.conversation(context, 'core.topology.node-suspended', [nodeId], (talk) => talk.suspend({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}), reason, ...(context.actorId ? { by: context.actorId } : {}) }), (result) => ({ reason, parentMarked: result.parentMarked, nodeLocked: result.nodeLocked, told: result.notice.told.length, unreachable: result.notice.unreachable.length, failed: result.notice.failed.length }), 'core.authority.suspend', true);
   }
   /** Resumes a suspended node. Restarting is harder than stopping, so it has its own permission, held by nobody by default. */
   topologyResume(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId');
     const parentId = input.parentId === undefined || input.parentId === null || input.parentId === '' ? undefined : this.text(input.parentId, 'parentId');
-    return this.conversation(context, 'core.topology.node-resumed', [nodeId], (talk) => talk.resume({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}) }), (result) => ({ parentCleared: result.parentCleared, nodeCleared: result.nodeCleared }), 'core.authority.resume', true);
+    return this.conversation(context, 'core.topology.node-resumed', [nodeId], (talk) => talk.resume({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}) }), (result) => ({ parentCleared: result.parentCleared, nodeCleared: result.nodeCleared, ...('notice' in result && result.notice ? { told: result.notice.told.length, unreachable: result.notice.unreachable.length, failed: result.notice.failed.length } : {}) }), 'core.authority.resume', true);
   }
 
   private machineNodeId: string | undefined;
