@@ -1,4 +1,4 @@
-import { requireMayHold, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType } from './local-nodes.js';
+import { requireMayHold, type CheckInAnswer, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -19,6 +19,7 @@ export interface NodePeer {
   setNextBasis(id: string, input: { basis: string; switchAt: string }): Promise<NodeDescription>;
   retire(id: string): Promise<{ parentId?: string; parentAddress?: string; children: ChildEntry[]; childListComplete: boolean }>;
   acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }): Promise<NodeDescription>;
+  checkIn(id: string, child: ChildEntry): Promise<CheckInAnswer>;
 }
 
 /**
@@ -359,6 +360,29 @@ export class Conversations {
       kept.push(child.childId);
     }
     return { kept, dropped, unreachable, unknown };
+  }
+
+  /**
+   * A node checks in with its own parent, which stamps the time on the node's entry in its list, adding the entry if
+   * it was missing. A parent that is retired answers with its own pointer, and the node then follows the chain to the
+   * nearest live ancestor (repairParent). The time is what the tree view shows; it is never the basis of a decision.
+   * `nodeAddress` is where the node's own Core is reached; the entry leaves it out when parent and node share a Core.
+   */
+  async checkIn(input: { nodeId: string; nodeAddress?: string }) {
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    if (typeof node === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
+    if (node.status !== 'ACTIVE') return { state: 'RETIRED' as const };
+    if (!node.parentId) return { state: 'TOP' as const };
+    const parentId = node.parentId;
+    const parent = await this.peer(parentId, node.parentAddress);
+    if (!parent) return { state: 'UNREACHABLE' as const, parentId };
+    const sameCore = !node.parentAddress || node.parentAddress === input.nodeAddress;
+    const answer = await parent.checkIn(parentId, { childId: input.nodeId, type: node.type, ...(!sameCore && input.nodeAddress ? { address: input.nodeAddress } : {}) });
+    if (answer.status === 'RETIRED') {
+      const repaired = await this.repairParent(input.nodeId, input.nodeAddress);
+      return { state: 'PARENT_RETIRED' as const, parentId, ...(repaired.changed ? { newParentId: repaired.parentId } : {}) };
+    }
+    return { state: 'CHECKED_IN' as const, parentId, lastSeenAt: answer.lastSeenAt, ...(answer.added ? { addedToList: true as const } : {}) };
   }
 
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */

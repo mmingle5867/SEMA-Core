@@ -75,6 +75,24 @@ export interface CoreHostAuthorization {
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }
 
+/** The report of the last round of check-ins: each active node this Core holds checks in with its own parent. */
+export interface CheckInRun {
+  checkedAt: string;
+  intervalSeconds: number;
+  note?: string;
+  nodes: Array<{
+    nodeId: string;
+    parentId?: string;
+    /** CHECKED_IN: the parent stamped the time. TOP: no parent to check in with. UNREACHABLE: the parent's Core did not answer. PARENT_RETIRED: the parent is retired; the node followed the chain (newParentId when it moved). FAILED: the parent refused or the check-in broke (see reason). */
+    state: 'CHECKED_IN' | 'TOP' | 'UNREACHABLE' | 'PARENT_RETIRED' | 'FAILED';
+    lastSeenAt?: string;
+    /** The parent's list did not have this node, and now does. */
+    addedToList?: true;
+    newParentId?: string;
+    reason?: string;
+  }>;
+}
+
 /** The report of the check that fetches a ready basis before a node's counter reaches its organization's length limit. */
 export interface KeyLimitCheck {
   checkedAt: string;

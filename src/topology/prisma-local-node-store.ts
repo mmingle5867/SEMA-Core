@@ -3,10 +3,10 @@ import { isNodeType, type ChildEntry, type KeyLimits, type LocalNode, type Local
 
 type Row = { id: string; type: string; parentId: string | null; parentAddress: string | null; basis: string; issued: bigint; childListComplete: boolean; status: string; maxSegments: number | null; maxSegmentLength: number | null; maxLastSegmentLength: number | null; nextBasis: string | null; switchAt: bigint | null };
 const limitsOf = (row: Row): KeyLimits | undefined => { const limits: KeyLimits = { ...(row.maxSegments !== null ? { maxSegments: Number(row.maxSegments) } : {}), ...(row.maxSegmentLength !== null ? { maxSegmentLength: Number(row.maxSegmentLength) } : {}), ...(row.maxLastSegmentLength !== null ? { maxLastSegmentLength: Number(row.maxLastSegmentLength) } : {}) }; return Object.keys(limits).length ? limits : undefined; };
-type ChildRow = { childId: string; childType: string; childAddress: string | null };
+type ChildRow = { childId: string; childType: string; childAddress: string | null; lastSeenAt: Date | null };
 const nodeType = (id: string, type: string) => { if (!isNodeType(type)) throw new Error(`Node ${id} has an unknown type: ${type}`); return type; };
 const toNode = (row: Row): LocalNode => ({ id: row.id, type: nodeType(row.id, row.type), ...(limitsOf(row) ? { keyLimits: limitsOf(row) } : {}), ...(row.nextBasis && row.switchAt !== null ? { nextBasis: row.nextBasis, switchAt: BigInt(row.switchAt) } : {}), ...(row.parentId ? { parentId: row.parentId } : {}), ...(row.parentAddress ? { parentAddress: row.parentAddress } : {}), basis: row.basis, issued: BigInt(row.issued), childListComplete: Boolean(row.childListComplete), status: row.status === 'RETIRED' ? 'RETIRED' : 'ACTIVE' });
-const toChild = (row: ChildRow): ChildEntry => ({ childId: row.childId, type: nodeType(row.childId, row.childType), ...(row.childAddress ? { address: row.childAddress } : {}) });
+const toChild = (row: ChildRow): ChildEntry => ({ childId: row.childId, type: nodeType(row.childId, row.childType), ...(row.childAddress ? { address: row.childAddress } : {}), ...(row.lastSeenAt ? { lastSeenAt: new Date(row.lastSeenAt).toISOString() } : {}) });
 type Tx = Pick<PrismaClient, '$executeRaw' | '$queryRaw'>;
 
 async function writeChildren(tx: Tx, id: string, entries: ChildEntry[]) {
@@ -50,7 +50,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
     });
   }
   async children(id: string) {
-    const rows = await this.prisma.$queryRaw<ChildRow[]>`SELECT "childId", "childType", "childAddress" FROM "sema_local_node_children" WHERE "parentId" = ${id} ORDER BY "addedAt", "childId"`;
+    const rows = await this.prisma.$queryRaw<ChildRow[]>`SELECT "childId", "childType", "childAddress", "lastSeenAt" FROM "sema_local_node_children" WHERE "parentId" = ${id} ORDER BY "addedAt", "childId"`;
     return rows.map(toChild);
   }
   async countChildren() {
@@ -70,6 +70,20 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
       if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
       return (await tx.$executeRaw`DELETE FROM "sema_local_node_children" WHERE "parentId" = ${id} AND "childId" = ${childId}`) === 1;
+    });
+  }
+  async checkIn(id: string, child: ChildEntry, at: Date) {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ status: string }>>`SELECT "status" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
+      if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
+      if (rows[0].status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
+      // The column has no time zone: the time is written as UTC, which is how it is read back.
+      const stamped = await tx.$executeRaw`UPDATE "sema_local_node_children" SET "lastSeenAt" = (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE "parentId" = ${id} AND "childId" = ${child.childId}`;
+      if (stamped === 1) return { added: false };
+      await tx.$executeRaw`
+        INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "lastSeenAt")
+        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC'))`;
+      return { added: true };
     });
   }
 }

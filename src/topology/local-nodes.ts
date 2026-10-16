@@ -50,7 +50,14 @@ export interface ChildEntry {
   type: NodeType;
   /** Where to reach the child's Core. Left out means the same Core as the parent. */
   address?: string;
+  /** When the child last checked in with this parent. Empty until it has. Never the basis of a decision. */
+  lastSeenAt?: string;
 }
+
+/** What a parent answers a child that checks in. A retired parent stamps nothing and names its own parent, so the child can follow the chain. */
+export type CheckInAnswer =
+  | { status: 'ACTIVE'; lastSeenAt: string; added: boolean }
+  | { status: 'RETIRED'; parentId?: string; parentAddress?: string };
 
 /**
  * Optional limits an organization sets on the IDs issued inside it: a preference, never needed for uniqueness. They
@@ -127,6 +134,11 @@ export interface LocalNodeStore {
   addChildren(id: string, entries: ChildEntry[]): Promise<void>;
   /** Takes one child off a node's list. Says whether it was there. */
   removeChild(id: string, childId: string): Promise<boolean>;
+  /**
+   * Stamps the time a child checked in on its entry. A child missing from the list is added: its own pointer says this
+   * is its parent, and the list may hold too many entries, never too few. Only an active node may gain children.
+   */
+  checkIn(id: string, child: ChildEntry, at: Date): Promise<{ added: boolean }>;
 }
 
 export class InMemoryLocalNodeStore implements LocalNodeStore {
@@ -158,6 +170,14 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
   async removeChild(id: string, childId: string) {
     if (!this.nodes.has(id)) throw new Error(`Node does not exist on this Core: ${id}`);
     return this.lists.get(id)!.delete(childId);
+  }
+  async checkIn(id: string, child: ChildEntry, at: Date) {
+    const node = this.nodes.get(id);
+    if (!node) throw new Error(`Node does not exist on this Core: ${id}`);
+    if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
+    const list = this.lists.get(id)!, current = list.get(child.childId);
+    list.set(child.childId, { ...(current ?? child), lastSeenAt: at.toISOString() });
+    return { added: !current };
   }
 }
 
@@ -338,6 +358,23 @@ export class LocalNodes {
     for (const child of entries) requireMayHold(parent, child);
     await this.store.addChildren(id, entries);
     return { childCount: (await this.store.children(id)).length };
+  }
+
+  /**
+   * A child checks in with this node, its parent: the time is stamped on the child's entry. A child missing from the
+   * list is added, if it is a type this node may hold. A retired node stamps nothing and answers with its own pointer,
+   * so the child can follow the chain to the nearest live ancestor.
+   */
+  async checkIn(id: string, child: { childId: string; type: NodeType; address?: string }): Promise<CheckInAnswer> {
+    const checked = entry(child);
+    if (checked.childId === id) throw new Error('A node cannot be its own child');
+    const parent = await this.store.get(id);
+    if (!parent) throw new Error(`Node does not exist on this Core: ${id}`);
+    if (parent.status !== 'ACTIVE') return { status: 'RETIRED', ...(parent.parentId ? { parentId: parent.parentId } : {}), ...(parent.parentAddress ? { parentAddress: parent.parentAddress } : {}) };
+    requireMayHold(parent, checked);
+    const at = new Date();
+    const { added } = await this.store.checkIn(id, checked, at);
+    return { status: 'ACTIVE', lastSeenAt: at.toISOString(), added };
   }
 
   /** Takes one child off a node's list. */

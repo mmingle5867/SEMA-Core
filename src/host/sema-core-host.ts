@@ -2,7 +2,7 @@ import type { SemaCore } from '../core/sema-core.js';
 import { SEMA_CORE_VERSION } from '../version.js';
 import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
-import type { CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
+import type { CheckInRun, CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
 import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
 import { Conversations, limitNotes, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
@@ -185,6 +185,9 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/key-limits', purpose: 'Set, change or clear an organization\'s optional key limits: maxSegments, maxSegmentLength, maxLastSegmentLength. A roll-up may leave the organization only when the basis has more segments than maxSegments.' },
         { method: 'POST', path: '/v1/core/topology/nodes/key-limits', purpose: 'Set, change or clear the key limits on an organization node held here. Used between Cores during key-limits.' },
         { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/check-in', purpose: 'A child checks in with a node held here, its parent: the time is stamped on its entry, which is added if missing. A retired parent answers with its own pointer. Used between Cores.' },
+        { method: 'GET', path: '/v1/core/topology/check-in-status', purpose: 'The last round of check-ins by the nodes this Core holds, each with its own parent, or null before the first round.' },
+        { method: 'POST', path: '/v1/core/topology/check-in', purpose: 'Check in now: every active node this Core holds checks in with its own parent. Returns the report.' },
         { method: 'GET', path: '/v1/core/topology/key-limit-status', purpose: 'The last report of the check that fetches a ready basis before a node reaches its organization\'s length limit, or null before the first run.' },
         { method: 'POST', path: '/v1/core/topology/key-limit-check', purpose: 'Run that check now and return its report.' },
         { method: 'POST', path: '/v1/core/topology/adopt-issued', purpose: 'Make an ID this Core already issued, and took into use as the same type, into a node, keeping the ID, so nothing pointing at it is renumbered. Needs the permission core.authority.adopt-issued.' },
@@ -313,6 +316,18 @@ export class SemaCoreHost {
   nodeSetNextBasis(context: CoreHostRequestContext, input: { nodeId: string; basis: string; switchAt: string }) { const nodeId = this.text(input.nodeId, 'nodeId'), basis = this.text(input.basis, 'basis'); return this.nodeChange(context, 'core.topology.next-basis-kept', [nodeId], (nodes) => nodes.setNextBasis(nodeId, { basis, switchAt: String(input.switchAt) }), (result) => ({ nextBasis: result.nextBasis ?? null, switchAt: result.switchAt ?? null })); }
   /** Records a lost node's old ID as retired, pointing at its replacement. Another Core asks this during replace-lost; it needs the same permission. */
   nodeAcceptRetired(context: CoreHostRequestContext, input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }) { const id = this.text(input.id, 'id'), type = this.nodeType(input.type), replacementId = this.text(input.replacementId, 'replacementId'); const replacementAddress = input.replacementAddress === undefined ? undefined : this.text(input.replacementAddress, 'replacementAddress'); return this.nodeChange(context, 'core.topology.lost-node-recorded', [id, replacementId], (nodes) => nodes.acceptRetired({ id, type, replacementId, replacementAddress }), () => ({ type, replacementId }), 'core.authority.replace-lost'); }
+  /**
+   * A child checks in with a node held here. Routine, so an ordinary check-in is not audited; adding a missing entry is,
+   * because it changes the list.
+   */
+  async nodeCheckIn(context: CoreHostRequestContext, input: { nodeId: string; childId: string; type: NodeType; address?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), childId = this.text(input.childId, 'childId'), type = this.nodeType(input.type);
+    const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
+    await this.requireAdministration(context, 'core.topology.write');
+    const answer = await this.requireNodes().checkIn(nodeId, { childId, type, ...(address ? { address } : {}) });
+    if (answer.status === 'ACTIVE' && answer.added) await this.core.recordAudit({ action: 'core.topology.child-added-by-check-in', actorId: context.actorId, subjectIds: [nodeId, childId], evidence: { type } });
+    return answer;
+  }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
 
   // Operations across machines. This Core runs the conversation; the other Cores are reached at their stored addresses.
@@ -453,6 +468,45 @@ export class SemaCoreHost {
     if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false');
     return this.conversation(context, 'core.topology.child-list-marked', [nodeId], (talk) => talk.markChildList({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), complete: input.complete }), () => ({ complete: input.complete }));
   }
+  private lastCheckIns: CheckInRun | undefined;
+  private checkInIntervalSeconds = 0;
+  /**
+   * Every active node this Core holds checks in with its own parent, which stamps the time on that node's entry. The
+   * tree view shows those times; nothing decides on them. A parent found retired sends the node up the chain to the
+   * nearest live ancestor. Runs at start, on a timer and on request; the report is kept in memory only.
+   */
+  async runCheckIns(actorId: string | null = null): Promise<CheckInRun> {
+    const checkedAt = new Date().toISOString(), intervalSeconds = this.checkInIntervalSeconds;
+    if (!this.localNodes || !this.topology) return (this.lastCheckIns = { checkedAt, intervalSeconds, nodes: [], note: 'Core-to-Core conversations are not configured on this Core' });
+    const talk = this.conversations(), address = this.ownAddress();
+    const nodes: CheckInRun['nodes'] = [];
+    for (const node of await this.localNodes.counters()) {
+      if (node.status !== 'ACTIVE') continue;
+      try {
+        const result = await talk.checkIn({ nodeId: node.id, nodeAddress: address });
+        if (result.state === 'RETIRED') continue;
+        if (result.state === 'PARENT_RETIRED' && result.newParentId) await this.core.recordAudit({ action: 'core.topology.parent-repaired', actorId, subjectIds: [node.id, result.newParentId], evidence: { retiredParentId: result.parentId, by: 'check-in' } });
+        nodes.push({ nodeId: node.id, ...result });
+      } catch (error) {
+        nodes.push({ nodeId: node.id, state: 'FAILED', reason: error instanceof Error ? error.message : 'The check-in failed' });
+      }
+    }
+    return (this.lastCheckIns = { checkedAt, intervalSeconds, nodes });
+  }
+  /** Checks in now and then on a timer the administrator sets. The timer never keeps the process alive and a failed round waits for the next. */
+  startCheckIns(intervalMs: number) {
+    if (!(intervalMs > 0)) return undefined;
+    this.checkInIntervalSeconds = Math.round(intervalMs / 1000);
+    this.runCheckIns().catch(() => undefined);
+    const timer = setInterval(() => { this.runCheckIns().catch(() => undefined); }, intervalMs);
+    timer.unref();
+    return timer;
+  }
+  /** The last round's report, or null before the first one. */
+  async topologyCheckInStatus(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return this.lastCheckIns ?? null; }
+  /** Checks in now and returns the report. */
+  async topologyCheckIn(context: CoreHostRequestContext) { await this.requireAdministration(context, 'core.topology.write'); return this.runCheckIns(context.actorId); }
+
   private lastKeyLimitCheck: KeyLimitCheck | undefined;
   /**
    * Looks at every active node this Core holds against its organization's length limit, and fetches a ready basis
