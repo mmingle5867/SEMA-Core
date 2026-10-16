@@ -187,6 +187,11 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
 
   assert.equal((await call('POST', '/v1/core/topology/resume', { nodeId: '3' })).status, 403, 'resuming needs its own permission');
   granted.add('core.authority.resume');
+  await call('POST', '/v1/core/topology/resume', { nodeId: '3' });
+  assert.equal((await call('POST', '/v1/core/topology/remove', { nodeId: '3' })).status, 403, 'retiring for good needs core.authority.retire, which core.topology.write does not cover');
+  await call('POST', '/v1/core/topology/suspend', { nodeId: '3', reason: 'Security check' });
+  granted.delete('core.authority.resume');
+  granted.add('core.authority.resume');
   const resumed = await call('POST', '/v1/core/topology/resume', { nodeId: '3' });
   assert.deepEqual([resumed.status, resumed.payload.nodeCleared], [200, true]);
   assert.equal((await call('POST', '/v1/core/identifiers/reservations', { count: 1 })).status, 201, 'working again');
