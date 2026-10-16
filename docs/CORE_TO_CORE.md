@@ -21,6 +21,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | --- | --- |
 | `GET /v1/core/topology/local` | The nodes this Core holds, each with `nextId` (the next ID it would issue: its basis plus the next number), and its own address. A retired node has no `nextId`. |
 | `GET /v1/core/topology/walk-up?nodeId=&nodeAddress=` | Parents in turn; stops where a machine cannot be reached. |
+| `GET /v1/core/topology/walk-down?nodeId=&nodeAddress=&view=&maxDepth=` | The tree below a node, asking each Core for its children, with each node's last check-in. `view=organization` (default) stops at any other organization; `view=global` shows only organizations and counts what is inside each. See "Check-ins". |
 | `POST /v1/core/topology/create` `{parentId, parentAddress?, type, newNodeAddress?}` | New node under a parent, here or on the Core at `newNodeAddress`. Installing a machine and adding a user are this. |
 | `POST /v1/core/topology/install-machine` `{parentId, parentAddress?, newCoreAddress, joinCode}` | Installs a new machine: issues a node ID and gives it to a Core that has no identity yet. See below. |
 | `POST /v1/core/topology/insert-above` `{childId, childAddress?, type, newNodeAddress?}` | New node between a node and its parent. |
@@ -60,6 +61,7 @@ Each active node a Core holds checks in with its own parent: when Core starts, o
 - **A retired parent stamps nothing** and answers with its own pointer. The child then follows the chain to the nearest live ancestor and adds itself there (the same as `repair-parent`), which is audited.
 - **The report** lists each node held here: `CHECKED_IN`, `TOP` (no parent), `UNREACHABLE` (the parent's Core did not answer), `PARENT_RETIRED` (with `newParentId` when it moved), or `FAILED` with a reason. It is kept in memory only (`GET /v1/core/topology/check-in-status`) and rebuilt by the next round.
 - Times come from the machine's own clock until the Core clock is built.
+- **Seeing the tree.** `walk-down` starts from any node and asks each Core in turn for its list, showing each node's last check-in. A Core that does not answer ends that branch (`UNREACHABLE`); nothing is guessed. The view is never the basis of a decision. It stops at 12 levels and 1,000 nodes by default.
 - Not built yet: checking in straight after a change to the node, and the other work the check-in is meant to carry (keyholder-list changes, Core update notices, proof of life for grants, learning that the node has been shut down).
 ## Node type
 

@@ -38,6 +38,26 @@ export interface AddressedPeers extends PeerDirectory {
 /** A node that answered, with the address it was reached at. */
 export type ReachedNode = NodeDescription & { address?: string };
 
+/**
+ * One node in a walk down the tree. `lastSeenAt` is from its parent's entry: when it last checked in. `stopped` says
+ * why the branch shows no further: its Core did not answer (UNREACHABLE) or did not know it (UNKNOWN), it is another
+ * organization (ORGANIZATION, inside-an-organization view), it is retired (RETIRED), the walk reached its depth or size
+ * limit (DEPTH, LIMIT), or the node was already shown higher up (CYCLE).
+ */
+export interface TreeNode {
+  id: string;
+  type?: NodeType;
+  status?: 'ACTIVE' | 'RETIRED';
+  address?: string;
+  lastSeenAt?: string;
+  childCount?: number;
+  childListIncomplete?: true;
+  /** In the global view, how many of an organization's children are not shown because they are inside it. */
+  hiddenChildren?: number;
+  stopped?: 'UNREACHABLE' | 'UNKNOWN' | 'ORGANIZATION' | 'RETIRED' | 'DEPTH' | 'LIMIT' | 'CYCLE';
+  children: TreeNode[];
+}
+
 export interface Ancestry {
   /** Nearest first. Only nodes that answered. */
   chain: ReachedNode[];
@@ -147,6 +167,42 @@ export class Conversations {
       next = { id: parent.parentId, address: parent.parentAddress };
     }
     return { chain };
+  }
+
+  /**
+   * Walks down from a node by asking each Core in turn for the node's list of children. Two views: `organization`
+   * shows everything below the starting node and stops at any other organization; `global` shows only organizations,
+   * stopping at each one and counting what is inside it. What it shows is what the lists say, with each node's last
+   * check-in; it is never the basis of a decision. A Core that does not answer ends that branch, and nothing is guessed.
+   */
+  async walkDown(input: { nodeId: string; nodeAddress?: string; view?: 'organization' | 'global'; maxDepth?: number; maxNodes?: number }): Promise<TreeNode> {
+    const view = input.view ?? 'organization';
+    const maxDepth = Math.min(Math.max(input.maxDepth ?? 12, 0), 50), maxNodes = Math.min(Math.max(input.maxNodes ?? 1000, 1), 5000);
+    const seen = new Set<string>();
+    let count = 0;
+    const visit = async (id: string, address: string | undefined, depth: number, entry?: ChildEntry): Promise<TreeNode> => {
+      count += 1;
+      const base: TreeNode = { id, ...(entry?.type ? { type: entry.type } : {}), ...(address ? { address } : {}), ...(entry?.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}), children: [] };
+      if (seen.has(id)) return { ...base, stopped: 'CYCLE' };
+      seen.add(id);
+      const node = await this.describeNode(id, address);
+      if (typeof node === 'string') return { ...base, stopped: node };
+      const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}) };
+      if (node.status !== 'ACTIVE') return { ...shown, stopped: 'RETIRED' };
+      if (depth > 0 && node.type === 'ORGANIZATION' && view === 'organization') return { ...shown, stopped: 'ORGANIZATION' };
+      if (!node.childCount) return shown;
+      if (depth >= maxDepth) return { ...shown, stopped: 'DEPTH' };
+      let entries: ChildEntry[];
+      try { entries = await (await this.mustPeer(id, 'The node', address)).children(id); } catch { return { ...shown, stopped: 'UNREACHABLE' }; }
+      let hidden = 0;
+      if (view === 'global' && node.type === 'ORGANIZATION') { hidden = entries.filter((child) => child.type !== 'ORGANIZATION').length; entries = entries.filter((child) => child.type === 'ORGANIZATION'); }
+      for (const child of entries) {
+        if (count >= maxNodes) return { ...shown, ...(hidden ? { hiddenChildren: hidden } : {}), stopped: 'LIMIT' };
+        shown.children.push(await visit(child.childId, child.address ?? address, depth + 1, child));
+      }
+      return { ...shown, ...(hidden ? { hiddenChildren: hidden } : {}) };
+    };
+    return visit(input.nodeId, input.nodeAddress, 0);
   }
 
   /** The nearest live ancestor, for a child whose parent was retired. Retired nodes keep their own pointer. */

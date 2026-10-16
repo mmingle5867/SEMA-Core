@@ -173,6 +173,7 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/retire', purpose: 'Retire a node and return its list of children so the parent can take them.' },
         { method: 'GET', path: '/v1/core/topology/local', purpose: 'List the nodes this Core holds, each with the next ID it would issue, and the address other Cores use to reach it.' },
         { method: 'GET', path: '/v1/core/topology/walk-up', purpose: 'Walk up from a node by asking each parent in turn (query: nodeId, nodeAddress).' },
+        { method: 'GET', path: '/v1/core/topology/walk-down', purpose: 'Walk down from a node by asking each Core for its children, with each node\'s last check-in (query: nodeId, nodeAddress, view = organization or global, maxDepth).' },
         { method: 'POST', path: '/v1/core/topology/create', purpose: 'Create a node of a given type (ORGANIZATION, GROUP, USER or MACHINE) under a parent, here or on another machine: installs a machine or adds a user.' },
         { method: 'POST', path: '/v1/core/authority/install-codes', purpose: 'Assign the first ID of a new system from the block this Core holds, and return the install code that carries it. Needs core.authority.issue-install-code.' },
         { method: 'GET', path: '/v1/core/authority/block', purpose: 'Read the block of first IDs this Core may assign, and how many are left.' },
@@ -353,6 +354,15 @@ export class SemaCoreHost {
   /** The nodes this Core holds, with the address others use to reach it. */
   async topologyLocal(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return { address: this.ownAddress() ?? null, nodes: await this.requireNodes().listWithNextId() }; }
   /** Walks up from a node, one parent at a time, stopping where a machine cannot be reached. */
+  /** Walks down from a node: inside its organization, or across organizations (global). Read-only. */
+  async topologyWalkDown(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; view?: string; maxDepth?: string | number }) {
+    await this.requireRead(context, 'core.topology.read');
+    const view = input.view === undefined || input.view === '' ? 'organization' : input.view;
+    if (view !== 'organization' && view !== 'global') throw new CoreHostValidationError('view must be organization or global');
+    const maxDepth = input.maxDepth === undefined || input.maxDepth === '' ? undefined : Number(input.maxDepth);
+    if (maxDepth !== undefined && !(Number.isInteger(maxDepth) && maxDepth >= 0 && maxDepth <= 50)) throw new CoreHostValidationError('maxDepth must be a whole number from 0 to 50');
+    return this.conversations().walkDown({ nodeId: this.text(input.nodeId, 'nodeId'), nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), view, ...(maxDepth !== undefined ? { maxDepth } : {}) });
+  }
   async topologyWalkUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) { await this.requireRead(context, 'core.topology.read'); return this.conversations().walkUp(this.text(input.nodeId, 'nodeId'), this.address(input.nodeAddress, 'nodeAddress')); }
   /** Creates a node under a parent, on this machine or on the Core at newNodeAddress. Installing a machine and adding a user are this operation. */
   topologyCreate(context: CoreHostRequestContext, input: { parentId: string; parentAddress?: string; type: NodeType; newNodeAddress?: string }) {
