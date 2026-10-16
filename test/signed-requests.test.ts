@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { componentValue, FileKeyStore, InMemoryClientKeyStore, InMemorySemaCoreHostStore, keyIdOf, LocalNodes, InMemoryLocalNodeStore, MemoryKeyStore, NonceMemory, parseSignature, parseSignatureInput, publicKeyFromJwk, SemaCore, SemaCoreHost, signatureBase, signP256, signRequest, startCoreHostHttpServer, verifyP256, verifyRequest, type CoreHostAuthorization, type SignableRequest } from '../src/index.js';
+import { componentValue, openCoreClientSigning, FileKeyStore, InMemoryClientKeyStore, InMemorySemaCoreHostStore, keyIdOf, LocalNodes, InMemoryLocalNodeStore, MemoryKeyStore, NonceMemory, parseSignature, parseSignatureInput, publicKeyFromJwk, SemaCore, SemaCoreHost, signatureBase, signP256, signRequest, startCoreHostHttpServer, verifyP256, verifyRequest, type CoreHostAuthorization, type SignableRequest } from '../src/index.js';
 
 // ---- RFC 9421's own examples ----
 // Figure 1 (§2.5): the signature base of the test request, character for character.
@@ -138,6 +138,15 @@ try {
   assert.deepEqual((await viaSignature('POST', '/v1/core/keys/clients/revoke', { keyId: signer.keyId })).payload, { keyId: signer.keyId, revoked: true });
   assert.equal((await viaSignature('GET', '/v1/core/topology/local')).status, 401, 'a revoked key is refused');
   assert.equal((await old('GET', '/v1/core/topology/local')).status, 200, 'the old key and secret still work until every program signs');
+
+  // The shared client code a program uses: its first signed request is refused as unregistered, so it registers and retries once.
+  const program = await openCoreClientSigning({ keyFile: 'unused', coreUrl: address, applicationKey: 'console', secret: 'console-secret', key: await new MemoryKeyStore().open() });
+  const firstCall = await program.fetch('GET', new URL(address + '/v1/core/topology/local'));
+  assert.equal(firstCall.status, 200, 'registered on the way, then accepted');
+  const write = await program.fetch('POST', new URL(address + '/v1/core/topology/create'), Buffer.from(JSON.stringify({ parentId: '3', type: 'USER' })), { 'content-type': 'application/json' });
+  assert.match(((await write.json()) as any).error.message, /cannot sit under a MACHINE/, 'a signed write with a body reaches Core');
+  const badSecret = await openCoreClientSigning({ keyFile: 'unused', coreUrl: address, applicationKey: 'console', secret: 'wrong', key: await new MemoryKeyStore().open() });
+  await assert.rejects(() => badSecret.fetch('GET', new URL(address + '/v1/core/topology/local')), /could not be registered with Core/, 'registering still needs the real secret');
   server.close();
 }
 
