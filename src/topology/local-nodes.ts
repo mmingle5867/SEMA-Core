@@ -123,11 +123,38 @@ export function checkKeyLimits(input: unknown): KeyLimits {
 }
 const hasLimits = (limits?: KeyLimits) => Boolean(limits && Object.keys(limits).length);
 
+/**
+ * SEMA's own seats, held on an organization node: named users and devices. A user seat for each person (USER node) and
+ * a physical seat for each machine (MACHINE node) in the organization, including inside its divisions: every
+ * organization above counts. Taken when one is added, given back when it is removed. No allowed number means no limit.
+ * The count in use may be too high, never too low.
+ */
+export interface Seats {
+  usersUsed: number;
+  machinesUsed: number;
+  usersAllowed?: number;
+  machinesAllowed?: number;
+}
+export type SeatKind = 'users' | 'machines';
+/** Which seat a node of this type takes, if any. */
+export const seatKind = (type: NodeType): SeatKind | undefined => (type === 'USER' ? 'users' : type === 'MACHINE' ? 'machines' : undefined);
+const SEAT_LIMIT_MAX = 1_000_000_000;
+const seatCount = (value: unknown, name: string) => {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > SEAT_LIMIT_MAX) throw new Error(`${name} must be a whole number from 0 to ${SEAT_LIMIT_MAX}`);
+  return value as number;
+};
+const emptySeats = (): Seats => ({ usersUsed: 0, machinesUsed: 0 });
+/** How seats look to anyone asking: in use and allowed, for users and for machines. */
+export interface SeatView { users: { used: number; allowed?: number }; machines: { used: number; allowed?: number } }
+const viewSeats = (seats: Seats): SeatView => ({ users: { used: seats.usersUsed, ...(seats.usersAllowed !== undefined ? { allowed: seats.usersAllowed } : {}) }, machines: { used: seats.machinesUsed, ...(seats.machinesAllowed !== undefined ? { allowed: seats.machinesAllowed } : {}) } });
+
 export interface LocalNode {
   id: string;
   type: NodeType;
   /** Set only on an organization node, and only when the organization chose limits. */
   keyLimits?: KeyLimits;
+  /** Set only on an organization node: its seats in use and allowed. */
+  seats?: Seats;
   /** Set when the node is shut down, itself or because an ancestor is. */
   shutdown?: Shutdown;
   parentId?: string;
@@ -253,6 +280,8 @@ export interface NodeDescription {
   childListIncomplete?: true;
   /** Present only on an organization node that has chosen limits. Read by a roll-up walking up through it. */
   keyLimits?: KeyLimits;
+  /** Present only on an organization node: its seats in use and allowed. */
+  seats?: SeatView;
   /** Present when the node is shut down: suspended itself, or locked because an ancestor is. */
   shutdown?: Shutdown;
   /** A basis fetched early and ready to take over, and the counter value after which it does. */
@@ -290,7 +319,7 @@ export class LocalNodes {
     if (!validId(input.id)) throw new Error('A node ID must be hyphen-separated non-empty segments');
     if (!isNodeType(input.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
     if (input.parentId !== undefined && input.parentId === input.id) throw new Error('A node cannot be its own parent');
-    const node: LocalNode = { id: input.id, type: input.type, ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'ACTIVE' };
+    const node: LocalNode = { id: input.id, type: input.type, ...(input.type === 'ORGANIZATION' ? { seats: emptySeats() } : {}), ...(input.parentId ? { parentId: input.parentId } : {}), ...(input.parentId && input.parentAddress ? { parentAddress: input.parentAddress } : {}), basis: input.id, issued: BigInt(0), childListComplete: true, status: 'ACTIVE' };
     await this.store.insert(node);
     return this.describeNode(node, 0);
   }
@@ -519,6 +548,60 @@ export class LocalNodes {
     return this.describeNode(changed, (await this.count(id)));
   }
 
+  private requireOrganization(node: LocalNode, what: string) {
+    if (node.type !== 'ORGANIZATION') throw new Error(`${what} are held on an organization node, and ${node.id} is ${a(node.type)}`);
+    return node.seats ?? emptySeats();
+  }
+
+  /**
+   * Takes seats (a positive change) or gives them back (a negative one) on an organization node held here, in one step.
+   * Taking is refused when it would pass the allowed number; giving back never is, and never goes below zero.
+   */
+  async changeSeats(id: string, change: { users?: number; machines?: number }) {
+    for (const [kind, value] of Object.entries(change)) if (value !== undefined && !Number.isInteger(value)) throw new Error(`The change in ${kind} seats must be a whole number`);
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const seats = { ...this.requireOrganization(node, 'Seats') };
+      for (const kind of ['users', 'machines'] as const) {
+        const delta = change[kind] ?? 0, used = kind === 'users' ? 'usersUsed' : 'machinesUsed', allowed = kind === 'users' ? seats.usersAllowed : seats.machinesAllowed;
+        if (delta > 0 && allowed !== undefined && seats[used] + delta > allowed) throw new Error(`No ${kind === 'users' ? 'user' : 'machine'} seat left in ${id}: ${seats[used]} of ${allowed} in use`);
+        seats[used] = Math.max(0, seats[used] + delta);
+      }
+      return { node: { ...node, seats }, result: seats };
+    });
+    return viewSeats(changed);
+  }
+
+  /** Sets or clears the allowed numbers of seats on an organization node held here. Undefined keeps a number; null clears it. */
+  async setSeatLimits(id: string, limits: { users?: number | null; machines?: number | null }) {
+    const users = limits.users === undefined || limits.users === null ? limits.users : seatCount(limits.users, 'users');
+    const machines = limits.machines === undefined || limits.machines === null ? limits.machines : seatCount(limits.machines, 'machines');
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const { usersAllowed, machinesAllowed, ...used } = this.requireOrganization(node, 'Seat limits');
+      const nextUsers = users === undefined ? usersAllowed : users ?? undefined, nextMachines = machines === undefined ? machinesAllowed : machines ?? undefined;
+      const seats: Seats = { ...used, ...(nextUsers !== undefined ? { usersAllowed: nextUsers } : {}), ...(nextMachines !== undefined ? { machinesAllowed: nextMachines } : {}) };
+      return { node: { ...node, seats }, result: seats };
+    });
+    return viewSeats(changed);
+  }
+
+  /**
+   * Sets the seats in use from a recount. When the recount reached everything, the numbers are set as counted; when it
+   * did not, a number is only ever raised, so a count is never left too low.
+   */
+  async setSeatsUsed(id: string, counted: { users: number; machines: number }, complete: boolean) {
+    const users = seatCount(counted.users, 'users'), machines = seatCount(counted.machines, 'machines');
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const seats = { ...this.requireOrganization(node, 'Seats') };
+      seats.usersUsed = complete ? users : Math.max(seats.usersUsed, users);
+      seats.machinesUsed = complete ? machines : Math.max(seats.machinesUsed, machines);
+      return { node: { ...node, seats }, result: seats };
+    });
+    return viewSeats(changed);
+  }
+
   /**
    * Retires a node. The record, its own pointer and its list of children stay as they were, so a child that
    * was offline can follow the chain upward. The list is returned so the caller can give the children to the parent.
@@ -540,6 +623,6 @@ export class LocalNodes {
     if (node.shutdown) throw new Error(`Node is suspended: ${node.id}${node.shutdown.nodeId === node.id ? '' : ` (because ${node.shutdown.nodeId} is suspended)`}. Reason: ${node.shutdown.reason}`);
   }
   private describeNode(node: LocalNode, childCount: number): NodeDescription {
-    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), ...(node.shutdown ? { shutdown: { ...node.shutdown } } : {}), ...(node.nextBasis && node.switchAt !== undefined ? { nextBasis: node.nextBasis, switchAt: node.switchAt.toString() } : {}), status: node.status };
+    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), ...(node.type === 'ORGANIZATION' ? { seats: viewSeats(node.seats ?? emptySeats()) } : {}), ...(node.shutdown ? { shutdown: { ...node.shutdown } } : {}), ...(node.nextBasis && node.switchAt !== undefined ? { nextBasis: node.nextBasis, switchAt: node.switchAt.toString() } : {}), status: node.status };
   }
 }

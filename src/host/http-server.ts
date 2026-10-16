@@ -72,6 +72,8 @@ function classify(error: unknown): { status: number; code: string; message: stri
   const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
   // Errors raised by custom authorization or store implementations are still recognised by message.
   if (/^Node is suspended/.test(message)) return { status: 423, code: 'SUSPENDED', message };
+  if (/^No (user|machine) seat left/.test(message)) return { status: 409, code: 'NO_SEAT', message };
+  if (/^Seats cannot be counted|cannot allow \d+ (user|machine) seats|to a different organization is not built yet|are held on an organization node/.test(message)) return { status: 400, code: 'INVALID_REQUEST', message };
   const status = /not authorized/i.test(message) ? 403 : /JSON|Request body|must be|cannot exceed|cannot sit under|no children in the tree|is already a node/i.test(message) ? 400 : 500;
   return { status, code: status === 403 ? 'FORBIDDEN' : status === 400 ? 'INVALID_REQUEST' : 'CORE_HOST_ERROR', message };
 }
@@ -135,6 +137,11 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await readJson(request) as Parameters<typeof host.topologyReplaceLost>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/suspend') return write(response, 200, await host.topologySuspend(context, await readJson(request) as Parameters<typeof host.topologySuspend>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/resume') return write(response, 200, await host.topologyResume(context, await readJson(request) as Parameters<typeof host.topologyResume>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/seat-limits') return write(response, 200, await host.topologySeatLimits(context, await readJson(request) as Parameters<typeof host.topologySeatLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/recount-seats') return write(response, 200, await host.topologyRecountSeats(context, await readJson(request) as Parameters<typeof host.topologyRecountSeats>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-change') return write(response, 200, await host.nodeSeatChange(context, await readJson(request) as Parameters<typeof host.nodeSeatChange>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-limits') return write(response, 200, await host.nodeSeatLimits(context, await readJson(request) as Parameters<typeof host.nodeSeatLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-count') return write(response, 200, await host.nodeSeatCount(context, await readJson(request) as Parameters<typeof host.nodeSeatCount>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/retire-away') return write(response, 200, await host.topologyRetireAway(context, await readJson(request) as Parameters<typeof host.topologyRetireAway>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire-child') return write(response, 200, await host.nodeRetireChild(context, await readJson(request) as Parameters<typeof host.nodeRetireChild>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/shutdown') return write(response, 200, await host.nodeSetShutdown(context, await readJson(request) as Parameters<typeof host.nodeSetShutdown>[1]));

@@ -13,7 +13,7 @@ import { Conversations, HttpPeerDirectory, InMemoryLocalNodeStore, InMemorySemaC
   // The top node has no parent to issue the ID, so here it issues it itself: its basis plus the next number.
   const first = await talk.addParentAbove({ nodeId: '3', type: 'ORGANIZATION', newNodePeer: nodes });
   assert.deepEqual(first, { id: '3-4', childId: '3', issuerId: '3' });
-  assert.deepEqual(await nodes.describe('3-4'), { id: '3-4', type: 'ORGANIZATION', basis: '3-4', childCount: 1, status: 'ACTIVE' });
+  assert.deepEqual(await nodes.describe('3-4'), { id: '3-4', type: 'ORGANIZATION', basis: '3-4', childCount: 1, seats: { users: { used: 1 }, machines: { used: 0 } }, status: 'ACTIVE' }, 'a new organization above counts the user already below it');
   assert.equal((await nodes.describe('3'))!.parentId, '3-4');
   assert.equal((await nodes.describe('3'))!.childCount, 1, 'the new parent is not the issuer\'s child');
   assert.deepEqual((await talk.walkUp('3-3')).chain.map((node) => node.id), ['3', '3-4']);

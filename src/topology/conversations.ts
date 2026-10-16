@@ -1,4 +1,4 @@
-import { requireMayHold, type CheckInAnswer, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType, type Shutdown, type Suspension } from './local-nodes.js';
+import { requireMayHold, seatKind, type CheckInAnswer, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType, type SeatKind, type SeatView, type Shutdown, type Suspension } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -23,6 +23,9 @@ export interface NodePeer {
   setShutdown(id: string, shutdown: Shutdown | null): Promise<NodeDescription>;
   markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null): Promise<{ marked: boolean }>;
   retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension): Promise<{ retired: true; childCount: number }>;
+  changeSeats(id: string, change: { users?: number; machines?: number }): Promise<SeatView>;
+  setSeatLimits(id: string, limits: { users?: number | null; machines?: number | null }): Promise<SeatView>;
+  setSeatsUsed(id: string, counted: { users: number; machines: number }, complete: boolean): Promise<SeatView>;
 }
 
 /**
@@ -63,6 +66,8 @@ export interface TreeNode {
   retired?: Suspension;
   /** What the node's own record says: shut down itself, or locked because an ancestor is. */
   shutdown?: Shutdown;
+  /** On an organization node: its seats in use and allowed. */
+  seats?: SeatView;
   stopped?: 'UNREACHABLE' | 'UNKNOWN' | 'ORGANIZATION' | 'RETIRED' | 'DEPTH' | 'LIMIT' | 'CYCLE';
   children: TreeNode[];
 }
@@ -75,6 +80,7 @@ export interface Ancestry {
 }
 
 const segments = (basis: string) => basis.split('-').length;
+const a = (type: NodeType) => `${type === 'ORGANIZATION' ? 'an' : 'a'} ${type}`;
 
 /**
  * The part of a walk up that is inside the node's own organization: everything up to and including its nearest
@@ -161,6 +167,48 @@ export class Conversations {
     return peer;
   }
 
+  /**
+   * The organizations that count a node placed under `parentId`: the parent itself when it is one, and every
+   * organization above it, nearest first. All of them must answer: a seat that cannot be counted is not taken.
+   */
+  private async countingOrganizations(parentId: string, parentAddress?: string): Promise<ReachedNode[]> {
+    const parent = await this.describeNode(parentId, parentAddress);
+    if (typeof parent === 'string') throw new Error(`Seats cannot be counted: the parent ${parentId} is not reachable`);
+    const { chain, stoppedAt } = await this.walkUp(parentId, parentAddress);
+    if (stoppedAt) throw new Error(`Seats cannot be counted: ${stoppedAt.nodeId}, above ${parentId}, is not reachable`);
+    return [{ ...parent, ...(parentAddress ? { address: parentAddress } : {}) }, ...chain].filter((node) => node.type === 'ORGANIZATION' && node.status === 'ACTIVE');
+  }
+
+  /** Takes seats in each organization, nearest first. If one refuses, those already taken are given back and the refusal stands. */
+  private async takeSeats(organizations: ReachedNode[], change: { users?: number; machines?: number }) {
+    if (!organizations.length || (!change.users && !change.machines)) return;
+    const taken: ReachedNode[] = [];
+    try {
+      for (const organization of organizations) {
+        await (await this.mustPeer(organization.id, 'The organization', organization.address)).changeSeats(organization.id, change);
+        taken.push(organization);
+      }
+    } catch (error) {
+      await this.giveSeats(taken, change);
+      throw error;
+    }
+  }
+
+  /** Gives seats back in each organization. One that cannot be reached keeps its count, too high, which is the safe way. */
+  private async giveSeats(organizations: ReachedNode[], change: { users?: number; machines?: number }) {
+    const back = { ...(change.users ? { users: -change.users } : {}), ...(change.machines ? { machines: -change.machines } : {}) };
+    const missed: string[] = [];
+    if (!back.users && !back.machines) return missed;
+    for (const organization of organizations) {
+      try { await (await this.mustPeer(organization.id, 'The organization', organization.address)).changeSeats(organization.id, back); } catch { missed.push(organization.id); }
+    }
+    return missed;
+  }
+  private async organizationsOrNone(parentId: string | undefined, parentAddress?: string) {
+    if (!parentId) return [];
+    try { return await this.countingOrganizations(parentId, parentAddress); } catch { return undefined; }
+  }
+
   /** Walks up from a node by asking each parent in turn, at the address stored beside each pointer. */
   async walkUp(nodeId: string, address?: string): Promise<Ancestry> {
     const chain: ReachedNode[] = [];
@@ -197,7 +245,7 @@ export class Conversations {
       seen.add(id);
       const node = await this.describeNode(id, address);
       if (typeof node === 'string') return { ...base, stopped: node };
-      const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}), ...(node.shutdown ? { shutdown: node.shutdown } : {}) };
+      const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}), ...(node.shutdown ? { shutdown: node.shutdown } : {}), ...(node.seats ? { seats: node.seats } : {}) };
       if (node.status !== 'ACTIVE') return { ...shown, stopped: 'RETIRED' };
       if (depth > 0 && node.type === 'ORGANIZATION' && view === 'organization') return { ...shown, stopped: 'ORGANIZATION' };
       if (node.type === 'USER' || node.type === 'MACHINE') return shown; // they hold nothing; any other node's list may hold retired records even when it counts no children
@@ -246,13 +294,18 @@ export class Conversations {
    */
   async createNode(input: { parentId: string; parentAddress?: string; type: NodeType; newNodePeer: NodePeer; newNodeAddress?: string }) {
     const parent = await this.mustPeer(input.parentId, 'The issuing parent', input.parentAddress);
-    const issued = await parent.issueChildId(input.parentId, { type: input.type, ...(input.newNodeAddress ? { address: input.newNodeAddress } : {}) });
+    const kind = seatKind(input.type), seat = kind ? { [kind]: 1 } : {};
+    const organizations = kind ? await this.countingOrganizations(input.parentId, input.parentAddress) : [];
+    await this.takeSeats(organizations, seat); // before anything is issued, so a full organization uses no ID
+    let issued: { value: string };
+    try { issued = await parent.issueChildId(input.parentId, { type: input.type, ...(input.newNodeAddress ? { address: input.newNodeAddress } : {}) }); }
+    catch (error) { await this.giveSeats(organizations, seat); throw error; }
     try {
       return await input.newNodePeer.accept({ id: issued.value, type: input.type, parentId: input.parentId, parentAddress: input.parentAddress });
     } catch (error) {
       let held: boolean | undefined;
       try { held = Boolean(await input.newNodePeer.describe(issued.value)); } catch { held = undefined; }
-      if (held === false) await parent.removeChild(input.parentId, issued.value).catch(() => undefined);
+      if (held === false) { await parent.removeChild(input.parentId, issued.value).catch(() => undefined); await this.giveSeats(organizations, seat); }
       throw error;
     }
   }
@@ -266,13 +319,19 @@ export class Conversations {
     if (input.parentId === input.id) throw new Error('A node cannot be its own parent');
     if (await input.nodePeer.describe(input.id)) throw new Error(`${input.id} is already a node`);
     const parent = input.parentId ? await this.mustPeer(input.parentId, 'The parent', input.parentAddress) : undefined;
-    if (parent && input.parentId) await parent.addChildren(input.parentId, [{ childId: input.id, type: input.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
+    const kind = seatKind(input.type), seat = kind ? { [kind]: 1 } : {};
+    const organizations = kind && input.parentId ? await this.countingOrganizations(input.parentId, input.parentAddress) : [];
+    await this.takeSeats(organizations, seat);
+    if (parent && input.parentId) {
+      try { await parent.addChildren(input.parentId, [{ childId: input.id, type: input.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]); }
+      catch (error) { await this.giveSeats(organizations, seat); throw error; }
+    }
     try {
       return await input.nodePeer.accept({ id: input.id, type: input.type, parentId: input.parentId, parentAddress: input.parentAddress });
     } catch (error) {
       let held: boolean | undefined;
       try { held = Boolean(await input.nodePeer.describe(input.id)); } catch { held = undefined; }
-      if (parent && input.parentId && held === false) await parent.removeChild(input.parentId, input.id).catch(() => undefined);
+      if (held === false) { if (parent && input.parentId) await parent.removeChild(input.parentId, input.id).catch(() => undefined); await this.giveSeats(organizations, seat); }
       throw error;
     }
   }
@@ -290,6 +349,7 @@ export class Conversations {
     await input.newNodePeer.addChildren(issued.value, [{ childId: input.childId, type: child.type, ...(input.childAddress ? { address: input.childAddress } : {}) }]);
     await (await this.mustPeer(input.childId, 'The node', input.childAddress)).setParent(input.childId, issued.value, input.newNodeAddress);
     await parent.removeChild(parentId, input.childId);              // the parent gave up the child; last, so a failure leaves one too many
+    if (input.type === 'ORGANIZATION') await this.recountSeats({ nodeId: issued.value, nodeAddress: input.newNodeAddress }).catch(() => undefined); // a new organization counts what is below it
     return { id: issued.value, parentId };
   }
 
@@ -315,6 +375,7 @@ export class Conversations {
     await input.newNodePeer.accept({ id: fresh.value, type: input.type });
     await input.newNodePeer.addChildren(fresh.value, [{ childId: input.nodeId, type: top.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
     await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, fresh.value, input.newNodeAddress);
+    if (input.type === 'ORGANIZATION') await this.recountSeats({ nodeId: fresh.value, nodeAddress: input.newNodeAddress }).catch(() => undefined); // a new organization counts what is below it
     return { id: fresh.value, childId: input.nodeId, issuerId: issuer.id };
   }
 
@@ -345,6 +406,8 @@ export class Conversations {
       const parent = await this.peer(input.lostParentId, input.lostParentAddress);
       if (parent) { try { await parent.removeChild(input.lostParentId, input.lostId); } catch { oldParentListStale = true; } } else oldParentListStale = true;
     }
+    const kind = seatKind(input.type);
+    if (kind && input.lostParentId) { const organizations = await this.organizationsOrNone(input.lostParentId, input.lostParentAddress); if (organizations) await this.giveSeats(organizations, { [kind]: 1 }); }
     return { lostId: input.lostId, replacementId: input.replacementId, oldParentListStale };
   }
 
@@ -363,12 +426,22 @@ export class Conversations {
     const newParent = await this.mustPeer(input.newParentId, 'The new parent', input.newParentAddress);
     const oldParent = node.parentId ? await this.peer(node.parentId, node.parentAddress) : undefined;
     if (node.parentId && !oldParent && !input.administratorOverride) throw new Error(`The old parent is not reachable: ${node.parentId}. An administrator can override.`);
+    // Seats follow a node into another organization: one for a user or machine, and a division's own counts for a division.
+    const kind = seatKind(node.type);
+    const carried = kind ? { [kind]: 1 } : node.type === 'ORGANIZATION' && node.seats ? { users: node.seats.users.used, machines: node.seats.machines.used } : {};
+    const newOrganizations = await this.countingOrganizations(input.newParentId, input.newParentAddress);
+    const oldOrganizations = node.parentId ? await this.organizationsOrNone(node.parentId, node.parentAddress) : [];
+    const toTake = newOrganizations.filter((organization) => !oldOrganizations?.some((old) => old.id === organization.id));
+    const toGive = (oldOrganizations ?? []).filter((organization) => !newOrganizations.some((now) => now.id === organization.id));
+    if ((toTake.length || toGive.length) && !kind && node.type !== 'ORGANIZATION') throw new Error(`Moving ${a(node.type)} to a different organization is not built yet: its people and machines would have to be counted. It comes with the structured join. Move the people and machines one by one, or keep it inside its organization`);
+    await this.takeSeats(toTake, carried);
     await newParent.addChildren(input.newParentId, [{ childId: input.nodeId, type: node.type, ...(input.nodeAddress ? { address: input.nodeAddress } : {}) }]);
     await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setParent(input.nodeId, input.newParentId, input.newParentAddress);
     let oldParentListStale = false;
     if (node.parentId) {
       if (oldParent) { try { await oldParent.removeChild(node.parentId, input.nodeId); } catch { oldParentListStale = true; } } else oldParentListStale = true;
     }
+    if (oldOrganizations) await this.giveSeats(toGive, carried);
     return { changed: true as const, oldParentListStale };
   }
 
@@ -383,6 +456,13 @@ export class Conversations {
     const node = await this.describeNode(input.nodeId, input.nodeAddress);
     if (typeof node === 'string') throw new Error(`The node is not reachable: ${input.nodeId}`);
     if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
+    const kind = seatKind(node.type);
+    const organizations = kind ? await this.organizationsOrNone(node.parentId, node.parentAddress) : [];
+    const removed = await this.removeNode(input, node);
+    if (kind && organizations) await this.giveSeats(organizations, { [kind]: 1 }); // after the node is retired; a missed one stays too high
+    return removed;
+  }
+  private async removeNode(input: { nodeId: string; nodeAddress?: string; childrenParentId?: string; childrenParentAddress?: string }, node: NodeDescription) {
     const nodePeer = await this.mustPeer(input.nodeId, 'The node', input.nodeAddress);
     const children = relocate(await nodePeer.children(input.nodeId), input.nodeAddress);
     const incomplete = node.childListIncomplete === true;
@@ -581,9 +661,57 @@ export class Conversations {
     const node = await this.describeNode(input.nodeId, input.nodeAddress);
     if (typeof node !== 'string') throw new Error(`${input.nodeId} can be reached. Use remove to retire it`);
     const parent = await this.mustPeer(input.parentId, 'The parent', input.parentAddress);
+    const listed = (await parent.children(input.parentId)).find((entry) => entry.childId === input.nodeId);
     const at = new Date().toISOString();
     const done = await parent.retireChild(input.parentId, { childId: input.nodeId }, { reason: input.reason.trim(), ...(input.by ? { by: input.by } : {}), at });
+    const kind = listed && !listed.retired ? seatKind(listed.type) : undefined;
+    if (kind) { const organizations = await this.organizationsOrNone(input.parentId, input.parentAddress); if (organizations) await this.giveSeats(organizations, { [kind]: 1 }); }
     return { nodeId: input.nodeId, parentId: input.parentId, at, childCount: done.childCount };
+  }
+
+  /**
+   * Sets or clears an organization's allowed numbers of seats, on its organization node's own Core. A division's
+   * number cannot exceed the number its nearest parent organization allows; the divisions' numbers need not add up to
+   * it, because the parent counts everyone below it anyway.
+   */
+  async setSeatLimits(input: { nodeId: string; nodeAddress?: string; users?: number | null; machines?: number | null }) {
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    if (typeof node === 'string') throw new Error(`The organization node is not reachable: ${input.nodeId}`);
+    const { chain } = await this.walkUp(input.nodeId, input.nodeAddress);
+    const above = chain.find((ancestor) => ancestor.type === 'ORGANIZATION' && ancestor.status === 'ACTIVE');
+    for (const kind of ['users', 'machines'] as const) {
+      const wanted = input[kind], ceiling = above?.seats?.[kind].allowed;
+      if (typeof wanted === 'number' && ceiling !== undefined && wanted > ceiling) throw new Error(`${input.nodeId} cannot allow ${wanted} ${kind === 'users' ? 'user' : 'machine'} seats: its parent organization ${above!.id} allows ${ceiling}`);
+    }
+    return (await this.mustPeer(input.nodeId, 'The organization node', input.nodeAddress)).setSeatLimits(input.nodeId, { ...(input.users !== undefined ? { users: input.users } : {}), ...(input.machines !== undefined ? { machines: input.machines } : {}) });
+  }
+
+  /**
+   * Counts an organization's seats again by walking down its lists: its own people and machines, wherever they are
+   * below it, and each division's own counts. Retired records are not counted; a person or machine that does not answer
+   * still is. When some part could not be reached, a count is only raised, never lowered.
+   */
+  async recountSeats(input: { nodeId: string; nodeAddress?: string }) {
+    const tree = await this.walkDown({ nodeId: input.nodeId, nodeAddress: input.nodeAddress, view: 'organization', maxDepth: 50, maxNodes: 5000 });
+    if (tree.type !== 'ORGANIZATION') throw new Error(`Seats are held on an organization node, and ${input.nodeId} is not one`);
+    let users = 0, machines = 0, complete = true;
+    const visit = (node: TreeNode, depth: number) => {
+      if (node.retired || node.status === 'RETIRED') return;
+      if (depth > 0 && node.type === 'ORGANIZATION') {
+        if (node.seats) { users += node.seats.users.used; machines += node.seats.machines.used; } else complete = false;
+        return;
+      }
+      const kind = node.type ? seatKind(node.type) : undefined;
+      if (kind === 'users') users += 1;
+      if (kind === 'machines') machines += 1;
+      if (!kind && node.stopped && node.stopped !== 'ORGANIZATION') complete = false;
+      if (node.childListIncomplete) complete = false;
+      node.children.forEach((child) => visit(child, depth + 1));
+    };
+    visit(tree, 0);
+    const before = tree.seats;
+    const after = await (await this.mustPeer(input.nodeId, 'The organization node', input.nodeAddress)).setSeatsUsed(input.nodeId, { users, machines }, complete);
+    return { nodeId: input.nodeId, counted: { users, machines }, complete, ...(before ? { before } : {}), seats: after };
   }
 
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */
