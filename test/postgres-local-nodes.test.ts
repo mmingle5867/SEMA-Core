@@ -161,12 +161,14 @@ try {
   const jwk = { kty: 'EC', crv: 'P-256', x: 'qIVYZVLCrPZHGHjP17CTW0_-D9Lfw0EkjqF7xB4FivA', y: 'Mc4nN9LTDOBhfoUeg8Ye9WedFRhnZXZJA12Qp0zZ6F0' };
   const addedKey = await clientKeys.add({ keyId: 'test-key', applicationKey: 'console', publicJwk: jwk });
   assert.deepEqual([addedKey.keyId, addedKey.applicationKey, addedKey.publicJwk, addedKey.revokedAt], ['test-key', 'console', jwk, undefined]);
+  assert.ok(Math.abs(Date.parse(addedKey.createdAt) - Date.now()) < 60_000, `a time the database fills in is UTC like every other (got ${addedKey.createdAt})`);
   await assert.rejects(() => clientKeys.add({ keyId: 'test-key', applicationKey: 'other', publicJwk: jwk }), /already registered/);
   assert.deepEqual((await clientKeys.list('console')).map((key) => key.keyId), ['test-key']);
   assert.deepEqual(await clientKeys.list('other'), []);
   assert.equal(await clientKeys.revoke('test-key'), true);
   assert.equal(await clientKeys.revoke('test-key'), false, 'revoking twice changes nothing');
-  assert.ok((await clientKeys.get('test-key'))!.revokedAt, 'a revoked key stays as a record');
+  const revokedAt = (await clientKeys.get('test-key'))!.revokedAt;
+  assert.ok(revokedAt && Math.abs(Date.parse(revokedAt) - Date.now()) < 60_000, 'a revoked key stays as a record, with its time in UTC');
   console.log('PostgreSQL local nodes test passed.');
 } finally {
   await prisma.$disconnect();

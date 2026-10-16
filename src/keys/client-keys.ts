@@ -52,12 +52,12 @@ export class PrismaClientKeyStore implements ClientKeyStore {
   async add(key: Omit<ClientKey, 'createdAt' | 'revokedAt'>) {
     const inserted = await this.prisma.$executeRaw`
       INSERT INTO "sema_core_client_keys" ("keyId", "applicationKey", "publicJwk", "createdAt")
-      VALUES (${key.keyId}, ${key.applicationKey}, ${JSON.stringify(key.publicJwk)}, NOW())
+      VALUES (${key.keyId}, ${key.applicationKey}, ${JSON.stringify(key.publicJwk)}, (NOW() AT TIME ZONE 'UTC'))
       ON CONFLICT ("keyId") DO NOTHING`;
     if (inserted !== 1) throw new Error(`Key ${key.keyId} is already registered`);
     return (await this.get(key.keyId))!;
   }
   async revoke(keyId: string) {
-    return (await this.prisma.$executeRaw`UPDATE "sema_core_client_keys" SET "revokedAt" = NOW() WHERE "keyId" = ${keyId} AND "revokedAt" IS NULL`) === 1;
+    return (await this.prisma.$executeRaw`UPDATE "sema_core_client_keys" SET "revokedAt" = (NOW() AT TIME ZONE 'UTC') WHERE "keyId" = ${keyId} AND "revokedAt" IS NULL`) === 1;
   }
 }

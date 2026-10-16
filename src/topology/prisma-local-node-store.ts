@@ -15,7 +15,7 @@ async function writeChildren(tx: Tx, id: string, entries: ChildEntry[]) {
   for (const child of entries) {
     await tx.$executeRaw`
       INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt")
-      VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW())
+      VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, (NOW() AT TIME ZONE 'UTC'))
       ON CONFLICT ("parentId", "childId") DO UPDATE SET "childType" = EXCLUDED."childType", "childAddress" = EXCLUDED."childAddress"`;
   }
 }
@@ -37,7 +37,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
   async insert(node: LocalNode) {
     const inserted = await this.prisma.$executeRaw`
       INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength", "nextBasis", "switchAt", "shutdownNodeId", "shutdownReason", "shutdownBy", "shutdownAt", "shutdownVia", "usersUsed", "machinesUsed", "usersAllowed", "machinesAllowed", "createdAt", "updatedAt")
-      VALUES (${node.id}, ${node.type}, ${node.parentId ?? null}, ${node.parentAddress ?? null}, ${node.basis}, ${node.issued}, ${node.childListComplete}, ${node.status}, ${node.keyLimits?.maxSegments ?? null}, ${node.keyLimits?.maxSegmentLength ?? null}, ${node.keyLimits?.maxLastSegmentLength ?? null}, ${node.nextBasis ?? null}, ${node.switchAt ?? null}, ${node.shutdown?.nodeId ?? null}, ${node.shutdown?.reason ?? null}, ${node.shutdown?.by ?? null}, (${node.shutdown?.at ?? null}::timestamptz AT TIME ZONE 'UTC'), ${node.shutdown?.via ?? null}, ${node.seats?.usersUsed ?? 0}, ${node.seats?.machinesUsed ?? 0}, ${node.seats?.usersAllowed ?? null}, ${node.seats?.machinesAllowed ?? null}, NOW(), NOW())
+      VALUES (${node.id}, ${node.type}, ${node.parentId ?? null}, ${node.parentAddress ?? null}, ${node.basis}, ${node.issued}, ${node.childListComplete}, ${node.status}, ${node.keyLimits?.maxSegments ?? null}, ${node.keyLimits?.maxSegmentLength ?? null}, ${node.keyLimits?.maxLastSegmentLength ?? null}, ${node.nextBasis ?? null}, ${node.switchAt ?? null}, ${node.shutdown?.nodeId ?? null}, ${node.shutdown?.reason ?? null}, ${node.shutdown?.by ?? null}, (${node.shutdown?.at ?? null}::timestamptz AT TIME ZONE 'UTC'), ${node.shutdown?.via ?? null}, ${node.seats?.usersUsed ?? 0}, ${node.seats?.machinesUsed ?? 0}, ${node.seats?.usersAllowed ?? null}, ${node.seats?.machinesAllowed ?? null}, (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
       ON CONFLICT ("id") DO NOTHING`;
     if (inserted !== 1) throw new Error(`Node already exists: ${node.id}`);
   }
@@ -46,7 +46,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       const rows = await tx.$queryRaw<Row[]>`SELECT "id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "maxSegments", "maxSegmentLength", "maxLastSegmentLength", "nextBasis", "switchAt", "shutdownNodeId", "shutdownReason", "shutdownBy", "shutdownAt", "shutdownVia", "usersUsed", "machinesUsed", "usersAllowed", "machinesAllowed" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
       if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
       const { node, result, addChildren } = change(toNode(rows[0]));
-      await tx.$executeRaw`UPDATE "sema_local_nodes" SET "parentId" = ${node.parentId ?? null}, "parentAddress" = ${node.parentAddress ?? null}, "basis" = ${node.basis}, "issued" = ${node.issued}, "childListComplete" = ${node.childListComplete}, "status" = ${node.status}, "maxSegments" = ${node.keyLimits?.maxSegments ?? null}, "maxSegmentLength" = ${node.keyLimits?.maxSegmentLength ?? null}, "maxLastSegmentLength" = ${node.keyLimits?.maxLastSegmentLength ?? null}, "nextBasis" = ${node.nextBasis ?? null}, "switchAt" = ${node.switchAt ?? null}, "shutdownNodeId" = ${node.shutdown?.nodeId ?? null}, "shutdownReason" = ${node.shutdown?.reason ?? null}, "shutdownBy" = ${node.shutdown?.by ?? null}, "shutdownAt" = (${node.shutdown?.at ?? null}::timestamptz AT TIME ZONE 'UTC'), "shutdownVia" = ${node.shutdown?.via ?? null}, "usersUsed" = ${node.seats?.usersUsed ?? 0}, "machinesUsed" = ${node.seats?.machinesUsed ?? 0}, "usersAllowed" = ${node.seats?.usersAllowed ?? null}, "machinesAllowed" = ${node.seats?.machinesAllowed ?? null}, "updatedAt" = NOW() WHERE "id" = ${id}`;
+      await tx.$executeRaw`UPDATE "sema_local_nodes" SET "parentId" = ${node.parentId ?? null}, "parentAddress" = ${node.parentAddress ?? null}, "basis" = ${node.basis}, "issued" = ${node.issued}, "childListComplete" = ${node.childListComplete}, "status" = ${node.status}, "maxSegments" = ${node.keyLimits?.maxSegments ?? null}, "maxSegmentLength" = ${node.keyLimits?.maxSegmentLength ?? null}, "maxLastSegmentLength" = ${node.keyLimits?.maxLastSegmentLength ?? null}, "nextBasis" = ${node.nextBasis ?? null}, "switchAt" = ${node.switchAt ?? null}, "shutdownNodeId" = ${node.shutdown?.nodeId ?? null}, "shutdownReason" = ${node.shutdown?.reason ?? null}, "shutdownBy" = ${node.shutdown?.by ?? null}, "shutdownAt" = (${node.shutdown?.at ?? null}::timestamptz AT TIME ZONE 'UTC'), "shutdownVia" = ${node.shutdown?.via ?? null}, "usersUsed" = ${node.seats?.usersUsed ?? 0}, "machinesUsed" = ${node.seats?.machinesUsed ?? 0}, "usersAllowed" = ${node.seats?.usersAllowed ?? null}, "machinesAllowed" = ${node.seats?.machinesAllowed ?? null}, "updatedAt" = (NOW() AT TIME ZONE 'UTC') WHERE "id" = ${id}`;
       if (addChildren?.length) await writeChildren(tx, id, addChildren);
       return result;
     });
@@ -88,7 +88,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       }
       await tx.$executeRaw`
         INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "lastSeenAt")
-        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC'))`;
+        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, (NOW() AT TIME ZONE 'UTC'), (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC'))`;
       return { added: true };
     });
   }
@@ -101,7 +101,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       if (!child.type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
       await tx.$executeRaw`
         INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "retiredReason", "retiredBy", "retiredAt")
-        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), ${retired.reason}, ${retired.by ?? null}, (${retired.at}::timestamptz AT TIME ZONE 'UTC'))`;
+        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, (NOW() AT TIME ZONE 'UTC'), ${retired.reason}, ${retired.by ?? null}, (${retired.at}::timestamptz AT TIME ZONE 'UTC'))`;
     });
   }
   async markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) {
@@ -114,7 +114,7 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       if (!child.type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
       await tx.$executeRaw`
         INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "suspendedReason", "suspendedBy", "suspendedAt")
-        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), ${suspension.reason}, ${suspension.by ?? null}, (${suspension.at}::timestamptz AT TIME ZONE 'UTC'))`;
+        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, (NOW() AT TIME ZONE 'UTC'), ${suspension.reason}, ${suspension.by ?? null}, (${suspension.at}::timestamptz AT TIME ZONE 'UTC'))`;
       return true;
     });
   }
