@@ -495,7 +495,43 @@ export class Conversations {
       nodeLocked = true;
     }
     if (!parentMarked && !nodeLocked) throw new Error(parentId ? `Neither ${input.nodeId} nor its parent ${parentId} could be reached; nothing was suspended` : `${input.nodeId} could not be reached. Name its parent (parentId) to mark it there`);
-    return { nodeId: input.nodeId, at, ...(parentId ? { parentId } : {}), parentMarked, nodeLocked };
+    const notice = nodeLocked ? await this.noticeDown({ nodeId: input.nodeId, nodeAddress: input.nodeAddress, shutdown: { nodeId: input.nodeId, ...mark } }) : { told: [], unreachable: [], failed: [] };
+    return { nodeId: input.nodeId, at, ...(parentId ? { parentId } : {}), parentMarked, nodeLocked, notice };
+  }
+
+  /**
+   * Passes a shutdown straight down the lists, so the nodes below lock now rather than at their next check-in; or, with
+   * null, tells them the node above was resumed. It is a convenience, not the guarantee: the decision is on the
+   * suspended node's record, and a node the notice misses still learns at its next check-in. A node suspended by an
+   * order of its own is left alone, and so is everything below it, which follows that node. Nodes that do not answer
+   * are listed; nothing is guessed. Each node is told it learned it from above (`via: PARENT`), so a check-in can correct it.
+   */
+  private async noticeDown(input: { nodeId: string; nodeAddress?: string; shutdown: Omit<Shutdown, 'via'> | null; maxNodes?: number }) {
+    const told: string[] = [], unreachable: string[] = [], failed: string[] = [];
+    const seen = new Set<string>([input.nodeId]), maxNodes = input.maxNodes ?? 5000;
+    const visit = async (id: string, address: string | undefined) => {
+      let entries: ChildEntry[];
+      try { entries = await (await this.mustPeer(id, 'The node', address)).children(id); } catch { return; }
+      for (const child of entries) {
+        if (seen.has(child.childId) || seen.size > maxNodes) continue;
+        seen.add(child.childId);
+        const childAddress = child.address ?? address;
+        const node = await this.describeNode(child.childId, childAddress);
+        if (typeof node === 'string') { unreachable.push(child.childId); continue; }
+        if (node.status !== 'ACTIVE') continue;
+        const current = node.shutdown;
+        if (current?.via === 'ORDER') continue;
+        if (input.shutdown && current?.nodeId === input.shutdown.nodeId && current.at === input.shutdown.at) { await visit(child.childId, childAddress); continue; }
+        if (!input.shutdown && (!current || current.nodeId !== input.nodeId)) continue;
+        try {
+          await (await this.mustPeer(child.childId, 'The node', childAddress)).setShutdown(child.childId, input.shutdown ? { ...input.shutdown, via: 'PARENT' } : null);
+          told.push(child.childId);
+        } catch { failed.push(child.childId); continue; }
+        await visit(child.childId, childAddress);
+      }
+    };
+    await visit(input.nodeId, input.nodeAddress);
+    return { told, unreachable, failed };
   }
 
   /**
@@ -516,7 +552,13 @@ export class Conversations {
     if (shutdown && shutdown.nodeId !== input.nodeId) return { nodeId: input.nodeId, parentCleared, nodeCleared, stillLockedBy: shutdown.nodeId };
     if (shutdown) { await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setShutdown(input.nodeId, null); nodeCleared = true; }
     if (!reachable && !parentCleared) throw new Error(parentId ? `Neither ${input.nodeId} nor its parent ${parentId} could be reached; nothing was resumed` : `${input.nodeId} could not be reached. Name its parent (parentId) to clear the mark there`);
-    return { nodeId: input.nodeId, parentCleared, nodeCleared, ...(reachable ? {} : { nodeUnreachable: true as const }) };
+    if (!reachable) return { nodeId: input.nodeId, parentCleared, nodeCleared, nodeUnreachable: true as const };
+    // Something above may still be suspended. Checking in now applies it at once, and the notice then passes on
+    // whichever is true: still locked from above, or free.
+    const checked = parentId ? await this.checkIn({ nodeId: input.nodeId, nodeAddress: input.nodeAddress }).catch(() => undefined) : undefined;
+    const above = checked && 'shutdown' in checked && checked.shutdown ? checked.shutdown : undefined;
+    const notice = await this.noticeDown({ nodeId: input.nodeId, nodeAddress: input.nodeAddress, shutdown: above ? { nodeId: above.nodeId, reason: above.reason, ...(above.by ? { by: above.by } : {}), at: above.at } : null });
+    return { nodeId: input.nodeId, parentCleared, nodeCleared, ...(above ? { stillLockedBy: above.nodeId } : {}), notice };
   }
 
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */
