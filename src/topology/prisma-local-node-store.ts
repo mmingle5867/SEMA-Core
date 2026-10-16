@@ -4,11 +4,11 @@ import { isNodeType, type ChildEntry, type KeyLimits, type LocalNode, type Local
 type Row = { id: string; type: string; parentId: string | null; parentAddress: string | null; basis: string; issued: bigint; childListComplete: boolean; status: string; maxSegments: number | null; maxSegmentLength: number | null; maxLastSegmentLength: number | null; nextBasis: string | null; switchAt: bigint | null; shutdownNodeId: string | null; shutdownReason: string | null; shutdownBy: string | null; shutdownAt: Date | null; shutdownVia: string | null };
 const limitsOf = (row: Row): KeyLimits | undefined => { const limits: KeyLimits = { ...(row.maxSegments !== null ? { maxSegments: Number(row.maxSegments) } : {}), ...(row.maxSegmentLength !== null ? { maxSegmentLength: Number(row.maxSegmentLength) } : {}), ...(row.maxLastSegmentLength !== null ? { maxLastSegmentLength: Number(row.maxLastSegmentLength) } : {}) }; return Object.keys(limits).length ? limits : undefined; };
 const shutdownOf = (row: Row): Shutdown | undefined => row.shutdownNodeId && row.shutdownReason && row.shutdownAt ? { nodeId: row.shutdownNodeId, reason: row.shutdownReason, ...(row.shutdownBy ? { by: row.shutdownBy } : {}), at: new Date(row.shutdownAt).toISOString(), via: row.shutdownVia === 'PARENT' ? 'PARENT' : 'ORDER' } : undefined;
-type ChildRow = { childId: string; childType: string; childAddress: string | null; lastSeenAt: Date | null; suspendedReason: string | null; suspendedBy: string | null; suspendedAt: Date | null };
+type ChildRow = { childId: string; childType: string; childAddress: string | null; lastSeenAt: Date | null; suspendedReason: string | null; suspendedBy: string | null; suspendedAt: Date | null; retiredReason: string | null; retiredBy: string | null; retiredAt: Date | null };
 const suspensionOf = (row: Pick<ChildRow, 'suspendedReason' | 'suspendedBy' | 'suspendedAt'>): Suspension | undefined => row.suspendedReason && row.suspendedAt ? { reason: row.suspendedReason, ...(row.suspendedBy ? { by: row.suspendedBy } : {}), at: new Date(row.suspendedAt).toISOString() } : undefined;
 const nodeType = (id: string, type: string) => { if (!isNodeType(type)) throw new Error(`Node ${id} has an unknown type: ${type}`); return type; };
 const toNode = (row: Row): LocalNode => ({ id: row.id, type: nodeType(row.id, row.type), ...(limitsOf(row) ? { keyLimits: limitsOf(row) } : {}), ...(shutdownOf(row) ? { shutdown: shutdownOf(row) } : {}), ...(row.nextBasis && row.switchAt !== null ? { nextBasis: row.nextBasis, switchAt: BigInt(row.switchAt) } : {}), ...(row.parentId ? { parentId: row.parentId } : {}), ...(row.parentAddress ? { parentAddress: row.parentAddress } : {}), basis: row.basis, issued: BigInt(row.issued), childListComplete: Boolean(row.childListComplete), status: row.status === 'RETIRED' ? 'RETIRED' : 'ACTIVE' });
-const toChild = (row: ChildRow): ChildEntry => ({ childId: row.childId, type: nodeType(row.childId, row.childType), ...(row.childAddress ? { address: row.childAddress } : {}), ...(row.lastSeenAt ? { lastSeenAt: new Date(row.lastSeenAt).toISOString() } : {}), ...(suspensionOf(row) ? { suspension: suspensionOf(row) } : {}) });
+const toChild = (row: ChildRow): ChildEntry => ({ childId: row.childId, type: nodeType(row.childId, row.childType), ...(row.childAddress ? { address: row.childAddress } : {}), ...(row.lastSeenAt ? { lastSeenAt: new Date(row.lastSeenAt).toISOString() } : {}), ...(suspensionOf(row) ? { suspension: suspensionOf(row) } : {}), ...(row.retiredReason && row.retiredAt ? { retired: { reason: row.retiredReason, ...(row.retiredBy ? { by: row.retiredBy } : {}), at: new Date(row.retiredAt).toISOString() } } : {}) });
 type Tx = Pick<PrismaClient, '$executeRaw' | '$queryRaw'>;
 
 async function writeChildren(tx: Tx, id: string, entries: ChildEntry[]) {
@@ -52,11 +52,11 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
     });
   }
   async children(id: string) {
-    const rows = await this.prisma.$queryRaw<ChildRow[]>`SELECT "childId", "childType", "childAddress", "lastSeenAt", "suspendedReason", "suspendedBy", "suspendedAt" FROM "sema_local_node_children" WHERE "parentId" = ${id} ORDER BY "addedAt", "childId"`;
+    const rows = await this.prisma.$queryRaw<ChildRow[]>`SELECT "childId", "childType", "childAddress", "lastSeenAt", "suspendedReason", "suspendedBy", "suspendedAt", "retiredReason", "retiredBy", "retiredAt" FROM "sema_local_node_children" WHERE "parentId" = ${id} ORDER BY "addedAt", "childId"`;
     return rows.map(toChild);
   }
   async countChildren() {
-    const rows = await this.prisma.$queryRaw<Array<{ parentId: string; count: number }>>`SELECT "parentId", COUNT(*)::int AS "count" FROM "sema_local_node_children" GROUP BY "parentId"`;
+    const rows = await this.prisma.$queryRaw<Array<{ parentId: string; count: number }>>`SELECT "parentId", COUNT(*)::int AS "count" FROM "sema_local_node_children" WHERE "retiredAt" IS NULL GROUP BY "parentId"`;
     return new Map(rows.map((row) => [row.parentId, Number(row.count)]));
   }
   async addChildren(id: string, entries: ChildEntry[]) {
@@ -80,12 +80,28 @@ export class PrismaLocalNodeStore implements LocalNodeStore {
       if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
       if (rows[0].status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
       // The column has no time zone: the time is written as UTC, which is how it is read back.
-      const stamped = await tx.$queryRaw<Array<Pick<ChildRow, 'suspendedReason' | 'suspendedBy' | 'suspendedAt'>>>`UPDATE "sema_local_node_children" SET "lastSeenAt" = (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE "parentId" = ${id} AND "childId" = ${child.childId} RETURNING "suspendedReason", "suspendedBy", "suspendedAt"`;
-      if (stamped[0]) { const suspension = suspensionOf(stamped[0]); return { added: false, ...(suspension ? { suspension } : {}) }; }
+      const stamped = await tx.$queryRaw<Array<Pick<ChildRow, 'suspendedReason' | 'suspendedBy' | 'suspendedAt' | 'retiredReason' | 'retiredBy' | 'retiredAt'>>>`UPDATE "sema_local_node_children" SET "lastSeenAt" = (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE "parentId" = ${id} AND "childId" = ${child.childId} RETURNING "suspendedReason", "suspendedBy", "suspendedAt", "retiredReason", "retiredBy", "retiredAt"`;
+      if (stamped[0]) {
+        const suspension = suspensionOf(stamped[0]), row = stamped[0];
+        const retired = row.retiredReason && row.retiredAt ? { reason: row.retiredReason, ...(row.retiredBy ? { by: row.retiredBy } : {}), at: new Date(row.retiredAt).toISOString() } : undefined;
+        return { added: false, ...(suspension ? { suspension } : {}), ...(retired ? { retired } : {}) };
+      }
       await tx.$executeRaw`
         INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "lastSeenAt")
         VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), (${at.toISOString()}::timestamptz AT TIME ZONE 'UTC'))`;
       return { added: true };
+    });
+  }
+  async retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension) {
+    await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "sema_local_nodes" WHERE "id" = ${id} FOR UPDATE`;
+      if (!rows[0]) throw new Error(`Node does not exist on this Core: ${id}`);
+      const updated = await tx.$executeRaw`UPDATE "sema_local_node_children" SET "retiredReason" = ${retired.reason}, "retiredBy" = ${retired.by ?? null}, "retiredAt" = (${retired.at}::timestamptz AT TIME ZONE 'UTC') WHERE "parentId" = ${id} AND "childId" = ${child.childId}`;
+      if (updated === 1) return;
+      if (!child.type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
+      await tx.$executeRaw`
+        INSERT INTO "sema_local_node_children" ("parentId", "childId", "childType", "childAddress", "addedAt", "retiredReason", "retiredBy", "retiredAt")
+        VALUES (${id}, ${child.childId}, ${child.type}, ${child.address ?? null}, NOW(), ${retired.reason}, ${retired.by ?? null}, (${retired.at}::timestamptz AT TIME ZONE 'UTC'))`;
     });
   }
   async markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) {

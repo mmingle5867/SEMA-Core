@@ -22,6 +22,7 @@ export interface NodePeer {
   checkIn(id: string, child: ChildEntry): Promise<CheckInAnswer>;
   setShutdown(id: string, shutdown: Shutdown | null): Promise<NodeDescription>;
   markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null): Promise<{ marked: boolean }>;
+  retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension): Promise<{ retired: true; childCount: number }>;
 }
 
 /**
@@ -58,6 +59,8 @@ export interface TreeNode {
   hiddenChildren?: number;
   /** The mark on its parent's entry: this node has been suspended. */
   suspension?: Suspension;
+  /** The mark on its parent's entry: this node was retired while it could not be reached. */
+  retired?: Suspension;
   /** What the node's own record says: shut down itself, or locked because an ancestor is. */
   shutdown?: Shutdown;
   stopped?: 'UNREACHABLE' | 'UNKNOWN' | 'ORGANIZATION' | 'RETIRED' | 'DEPTH' | 'LIMIT' | 'CYCLE';
@@ -188,7 +191,8 @@ export class Conversations {
     let count = 0;
     const visit = async (id: string, address: string | undefined, depth: number, entry?: ChildEntry): Promise<TreeNode> => {
       count += 1;
-      const base: TreeNode = { id, ...(entry?.type ? { type: entry.type } : {}), ...(address ? { address } : {}), ...(entry?.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}), ...(entry?.suspension ? { suspension: entry.suspension } : {}), children: [] };
+      const base: TreeNode = { id, ...(entry?.type ? { type: entry.type } : {}), ...(address ? { address } : {}), ...(entry?.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}), ...(entry?.suspension ? { suspension: entry.suspension } : {}), ...(entry?.retired ? { retired: entry.retired } : {}), children: [] };
+      if (entry?.retired) return { ...base, status: 'RETIRED', stopped: 'RETIRED' };
       if (seen.has(id)) return { ...base, stopped: 'CYCLE' };
       seen.add(id);
       const node = await this.describeNode(id, address);
@@ -196,7 +200,7 @@ export class Conversations {
       const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}), ...(node.shutdown ? { shutdown: node.shutdown } : {}) };
       if (node.status !== 'ACTIVE') return { ...shown, stopped: 'RETIRED' };
       if (depth > 0 && node.type === 'ORGANIZATION' && view === 'organization') return { ...shown, stopped: 'ORGANIZATION' };
-      if (!node.childCount) return shown;
+      if (node.type === 'USER' || node.type === 'MACHINE') return shown; // they hold nothing; any other node's list may hold retired records even when it counts no children
       if (depth >= maxDepth) return { ...shown, stopped: 'DEPTH' };
       let entries: ChildEntry[];
       try { entries = await (await this.mustPeer(id, 'The node', address)).children(id); } catch { return { ...shown, stopped: 'UNREACHABLE' }; }
@@ -415,6 +419,7 @@ export class Conversations {
     const parent = await this.mustPeer(input.nodeId, 'The node', input.nodeAddress);
     const kept: string[] = [], dropped: string[] = [], unreachable: string[] = [], unknown: string[] = [];
     for (const child of await parent.children(input.nodeId)) {
+      if (child.retired) continue; // the record that refuses it if it comes back
       const answer = await this.describeNode(child.childId, child.address ?? input.nodeAddress);
       if (answer === 'UNREACHABLE') { unreachable.push(child.childId); continue; }
       if (answer === 'UNKNOWN') { unknown.push(child.childId); continue; }
@@ -440,6 +445,10 @@ export class Conversations {
     if (!parent) return { state: 'UNREACHABLE' as const, parentId };
     const sameCore = !node.parentAddress || node.parentAddress === input.nodeAddress;
     const answer = await parent.checkIn(parentId, { childId: input.nodeId, type: node.type, ...(!sameCore && input.nodeAddress ? { address: input.nodeAddress } : {}) });
+    if (answer.status === 'CHILD_RETIRED') {
+      await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).retire(input.nodeId);
+      return { state: 'RETIRED_WHILE_AWAY' as const, parentId, retired: answer.retired };
+    }
     if (answer.status === 'RETIRED') {
       const repaired = await this.repairParent(input.nodeId, input.nodeAddress);
       return { state: 'PARENT_RETIRED' as const, parentId, ...(repaired.changed ? { newParentId: repaired.parentId } : {}) };
@@ -513,7 +522,7 @@ export class Conversations {
       let entries: ChildEntry[];
       try { entries = await (await this.mustPeer(id, 'The node', address)).children(id); } catch { return; }
       for (const child of entries) {
-        if (seen.has(child.childId) || seen.size > maxNodes) continue;
+        if (child.retired || seen.has(child.childId) || seen.size > maxNodes) continue;
         seen.add(child.childId);
         const childAddress = child.address ?? address;
         const node = await this.describeNode(child.childId, childAddress);
@@ -559,6 +568,22 @@ export class Conversations {
     const above = checked && 'shutdown' in checked && checked.shutdown ? checked.shutdown : undefined;
     const notice = await this.noticeDown({ nodeId: input.nodeId, nodeAddress: input.nodeAddress, shutdown: above ? { nodeId: above.nodeId, reason: above.reason, ...(above.by ? { by: above.by } : {}), at: above.at } : null });
     return { nodeId: input.nodeId, parentCleared, nodeCleared, ...(above ? { stillLockedBy: above.nodeId } : {}), notice };
+  }
+
+  /**
+   * Retires a user or a machine that cannot be reached, for good: an employee who has left, stolen equipment, a machine
+   * that is gone. Its parent keeps the entry marked retired, so if it ever comes back its check-in is refused and it
+   * retires its own record; its ID is never used again. A node that can be reached is retired with remove instead.
+   */
+  async retireAway(input: { nodeId: string; nodeAddress?: string; parentId: string; parentAddress?: string; reason: string; by?: string }) {
+    if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('Retiring needs a reason');
+    if (input.parentId === input.nodeId) throw new Error('A node cannot be its own parent');
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    if (typeof node !== 'string') throw new Error(`${input.nodeId} can be reached. Use remove to retire it`);
+    const parent = await this.mustPeer(input.parentId, 'The parent', input.parentAddress);
+    const at = new Date().toISOString();
+    const done = await parent.retireChild(input.parentId, { childId: input.nodeId }, { reason: input.reason.trim(), ...(input.by ? { by: input.by } : {}), at });
+    return { nodeId: input.nodeId, parentId: input.parentId, at, childCount: done.childCount };
   }
 
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */

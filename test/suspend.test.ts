@@ -40,7 +40,7 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
   assert.equal((await talk.resume({ nodeId: pc })).stillLockedBy, site);
   const resumed = await talk.resume({ nodeId: site });
   assert.deepEqual([resumed.parentCleared, resumed.nodeCleared, resumed.stillLockedBy], [true, true, undefined]);
-  assert.deepEqual(resumed.notice, { told: [pc], unreachable: [], failed: [] }, 'the news goes down too');
+  assert.deepEqual('notice' in resumed && resumed.notice, { told: [pc], unreachable: [], failed: [] }, 'the news goes down too');
   assert.equal((await nodes.describe(site))!.shutdown, undefined);
   assert.equal((await nodes.children('3')).find((child) => child.childId === site)!.suspension, undefined);
   await nodes.issueBasis(site);
@@ -64,7 +64,7 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
 
   // Resuming the building: the printer is free; the floor is still suspended, so the PC stays locked.
   const reopened = await talk.resume({ nodeId: building });
-  assert.deepEqual(reopened.notice!.told, [printer]);
+  assert.deepEqual('notice' in reopened && reopened.notice?.told, [printer]);
   assert.deepEqual([await lockOf(building), await lockOf(floor), await lockOf(pc), await lockOf(printer)], ['free', `${floor}/ORDER`, `${floor}/PARENT`, 'free']);
 
   // The other order: suspend the building again, then resume the floor. The floor is now held by the building, and so is the PC.
@@ -112,6 +112,44 @@ import { Conversations, InMemoryLocalNodeStore, InMemorySemaCoreHostStore, Local
 
   // A top node has no parent to mark it, so an offline top node cannot be suspended from outside.
   await assert.rejects(() => talk.suspend({ nodeId: '9', nodeAddress: 'http://laptop', reason: 'x' }), /could not be reached/);
+}
+
+// Retiring a machine that is away, for good: its parent keeps the record, and if it ever comes back it retires itself.
+{
+  const office = new LocalNodes(new InMemoryLocalNodeStore()), laptop = new LocalNodes(new InMemoryLocalNodeStore());
+  let laptopOnline = true;
+  const directory: PeerDirectory = { async find(_id, address) { return address === 'http://laptop' ? (laptopOnline ? laptop : undefined) : office; } };
+  const talk = new Conversations(directory);
+  await office.accept({ id: '3', type: 'SITE' });
+  await office.issueChildId('3', { type: 'MACHINE', address: 'http://laptop' });
+  await laptop.accept({ id: '3-3', type: 'MACHINE', parentId: '3', parentAddress: 'http://office' });
+  const away = { nodeId: '3-3', nodeAddress: 'http://laptop', parentId: '3', reason: 'Stolen' };
+
+  await assert.rejects(() => talk.retireAway(away), /can be reached\. Use remove/);
+  laptopOnline = false;
+  await assert.rejects(() => talk.retireAway({ ...away, reason: '' }), /needs a reason/);
+  assert.equal((await talk.retireAway({ ...away, by: 'admin' })).childCount, 0);
+  assert.equal((await office.describe('3'))!.childCount, 0, 'a retired entry is not counted as a child');
+  assert.deepEqual([(await office.children('3'))[0].retired!.reason, (await office.children('3'))[0].retired!.by], ['Stolen', 'admin'], 'the entry stays as the record');
+  const tree = await talk.walkDown({ nodeId: '3' });
+  assert.deepEqual([tree.children[0].stopped, tree.children[0].retired?.reason], ['RETIRED', 'Stolen']);
+  assert.deepEqual((await talk.suspend({ nodeId: '3', reason: 'x' })).notice, { told: [], unreachable: [], failed: [] }, 'the notice passes it by');
+  await talk.resume({ nodeId: '3' });
+  assert.deepEqual((await talk.checkChildren({ nodeId: '3' })).dropped, [], 'check-children keeps the record');
+
+  // It comes back: its check-in is answered with the retirement, and it retires its own record.
+  laptopOnline = true;
+  const back = await talk.checkIn({ nodeId: '3-3', nodeAddress: 'http://laptop' });
+  assert.deepEqual([back.state, 'retired' in back && back.retired?.reason], ['RETIRED_WHILE_AWAY', 'Stolen']);
+  assert.equal((await laptop.describe('3-3'))!.status, 'RETIRED');
+  await assert.rejects(() => laptop.issueBasis('3-3'), /retired/);
+  assert.equal((await office.describe('3'))!.childCount, 0, 'coming back does not put it back on the list');
+
+  // Only a user or a machine: anything else has its own list of children on its machine.
+  await office.accept({ id: '5', type: 'ORGANIZATION' });
+  await office.issueChildId('5', { type: 'GROUP', address: 'http://laptop' });
+  laptopOnline = false;
+  await assert.rejects(() => talk.retireAway({ nodeId: '5-3', nodeAddress: 'http://laptop', parentId: '5', reason: 'Gone' }), /Only a user or a machine/);
 }
 
 // The whole Core: suspending its own machine node locks it. It refuses changes and work, stays readable, and resumes with its own permission.

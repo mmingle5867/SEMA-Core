@@ -203,6 +203,11 @@ model SemaLocalNodeChild {
   suspendedReason String?
   suspendedBy     String?
   suspendedAt     DateTime?
+  /// Set when the child was retired while it could not be reached. The entry stays as the record that refuses it if
+  /// it comes back, and is not counted as a child. Times are UTC.
+  retiredReason   String?
+  retiredBy       String?
+  retiredAt       DateTime?
 
   @@id([parentId, childId])
   @@map("sema_local_node_children")

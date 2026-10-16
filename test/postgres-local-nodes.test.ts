@@ -125,6 +125,15 @@ try {
   assert.equal((await nodes.setShutdown('3-T6', null)).shutdown, undefined);
   assert.equal((await nodes.issueChildId('3-T6', { type: 'MACHINE' })).value, '3-T6-3', 'working again once cleared');
 
+  // A child retired while away keeps its entry as the record, is not counted, and is told so if it checks in.
+  const before = (await nodes.describe('3-T6'))!.childCount;
+  assert.equal((await nodes.retireChild('3-T6', { childId: '3-T6-4' }, { reason: 'Stolen', by: 'admin', at })).childCount, before - 1);
+  assert.deepEqual((await nodes.children('3-T6')).find((child) => child.childId === '3-T6-4')!.retired, { reason: 'Stolen', by: 'admin', at });
+  assert.equal((await nodes.list()).find((node) => node.id === '3-T6')!.childCount, before - 1, 'the count of every node leaves it out too');
+  assert.deepEqual(await nodes.checkIn('3-T6', { childId: '3-T6-4', type: 'MACHINE' }), { status: 'CHILD_RETIRED', retired: { reason: 'Stolen', by: 'admin', at } });
+  await nodes.retireChild('3-T6', { childId: '3-T6-9', type: 'USER' }, { reason: 'Left', at });
+  await assert.rejects(() => nodes.retireChild('3-T6', { childId: '3-T6-8', type: 'SITE' }, { reason: 'x', at }), /Only a user or a machine/);
+
   // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
   assert.deepEqual(await nodes.acceptRetired({ id: '3-T7', type: 'GROUP', replacementId: '3-T2', replacementAddress: 'http://here.example:4310' }), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
   assert.deepEqual(await nodes.describe('3-T7'), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
