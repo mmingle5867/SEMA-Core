@@ -107,6 +107,24 @@ try {
   assert.deepEqual(await nodes.checkIn('3-T1', { childId: '3-T3', type: 'USER' }), { status: 'RETIRED', parentId: '3', parentAddress: 'http://parent.example:4310' });
   await assert.rejects(() => nodes.checkIn('3-T6', { childId: '3-T9', type: 'USER' }), /cannot sit under a SITE/);
 
+  // A suspension is stored on the parent's entry and on the node's own record, times in UTC, and both clear.
+  const at = '2026-10-16T03:30:00.000Z';
+  assert.deepEqual(await nodes.markChild('3-T6', { childId: '3-T6-3' }, { reason: 'Lost laptop', by: 'admin', at }), { marked: true });
+  const suspendedEntry = await nodes.checkIn('3-T6', { childId: '3-T6-3', type: 'MACHINE' });
+  assert.deepEqual(suspendedEntry.status === 'ACTIVE' ? suspendedEntry.shutdown : undefined, { nodeId: '3-T6-3', reason: 'Lost laptop', by: 'admin', at }, 'a check-in reply carries the mark');
+  assert.deepEqual((await nodes.children('3-T6'))[0].suspension, { reason: 'Lost laptop', by: 'admin', at });
+  assert.deepEqual(await nodes.markChild('3-T6', { childId: '3-T6-4', type: 'MACHINE' }, { reason: 'Gone', at }), { marked: true }, 'marking a child missing from the list adds it');
+  assert.deepEqual(await nodes.markChild('3-T6', { childId: '3-T6-5' }, null), { marked: false }, 'clearing never adds an entry');
+  await nodes.markChild('3-T6', { childId: '3-T6-3' }, null);
+  assert.equal((await nodes.children('3-T6'))[0].suspension, undefined);
+  assert.deepEqual((await nodes.setShutdown('3-T6', { nodeId: '3-T6', reason: 'Investigation', at, via: 'ORDER' })).shutdown, { nodeId: '3-T6', reason: 'Investigation', at, via: 'ORDER' });
+  assert.deepEqual((await nodes.describe('3-T6'))!.shutdown, { nodeId: '3-T6', reason: 'Investigation', at, via: 'ORDER' }, 'the lock is stored, so a restart keeps it');
+  await assert.rejects(() => nodes.issueChildId('3-T6', { type: 'MACHINE' }), /Node is suspended/);
+  const lockedAnswer = await nodes.checkIn('3-T6', { childId: '3-T6-3', type: 'MACHINE' });
+  assert.equal(lockedAnswer.status === 'ACTIVE' ? lockedAnswer.shutdown?.nodeId : undefined, '3-T6', 'a shut-down parent tells its children');
+  assert.equal((await nodes.setShutdown('3-T6', null)).shutdown, undefined);
+  assert.equal((await nodes.issueChildId('3-T6', { type: 'MACHINE' })).value, '3-T6-3', 'working again once cleared');
+
   // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
   assert.deepEqual(await nodes.acceptRetired({ id: '3-T7', type: 'GROUP', replacementId: '3-T2', replacementAddress: 'http://here.example:4310' }), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
   assert.deepEqual(await nodes.describe('3-T7'), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
