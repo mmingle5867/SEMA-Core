@@ -7,6 +7,14 @@ export class CoreHostValidationError extends Error {
 }
 
 /** Raised when the caller is not allowed to perform a Core Host operation. Maps to HTTP 403. */
+/** This Core is shut down: its own machine node is suspended. It refuses changes and work, and stays readable. */
+export class CoreHostLockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoreHostLockedError';
+  }
+}
+
 export class CoreHostAuthorizationError extends Error {
   constructor(message: string) {
     super(message);

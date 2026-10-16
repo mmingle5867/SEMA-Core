@@ -35,6 +35,8 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor, adding it to that ancestor's list first. |
 | `POST /v1/core/topology/check-children` `{nodeId, nodeAddress?}` | Check a node's list against its children's own pointers. See below. |
 | `POST /v1/core/topology/mark-child-list` `{nodeId, nodeAddress?, complete}` | An administrator says whether a node's list of children is complete. |
+| `POST /v1/core/topology/suspend` `{nodeId, nodeAddress?, parentId?, parentAddress?, reason}` | Suspends a node. Needs `core.authority.suspend`. See "Suspending a node". |
+| `POST /v1/core/topology/resume` `{nodeId, nodeAddress?, parentId?, parentAddress?}` | Resumes a suspended node. Needs `core.authority.resume`. |
 | `POST /v1/core/topology/check-in` | Check in now: every active node this Core holds checks in with its own parent. Returns the report. See "Check-ins". |
 | `GET /v1/core/topology/check-in-status` | The last round's report, or `null` before the first. Needs `core.topology.read`. |
 
@@ -207,3 +209,17 @@ What uses them today:
 A node past its limit with no ready basis keeps issuing: a limit is a preference. The check reports each node as `NO_LIMIT`, `OK`, `READY`, `NEEDS_BASIS` (near the limit, none could be fetched), `OVER_LIMIT` (past it, none, still issuing) or `UNCHECKED`, with the reason. `GET /v1/core/topology/key-limit-status` returns the last report (kept in memory, rebuilt by every run; `core.topology.read`); `POST /v1/core/topology/key-limit-check` runs it now (`core.topology.write`). Fetching a ready basis is audited.
 
 An ID records the basis it came from, so after a switch the issued-ID record names the new basis. Adopt-issued now checks only that this Core issued the ID.
+
+## Suspending a node
+
+The first piece of shutting down a Core (design doc section 8): suspend, which can be undone. Retiring for good is `remove`. Signed orders, the immediate notice down the lists, and the offline window are not built yet.
+
+- **`suspend` marks the node in two places.** Its parent's entry for it carries the mark (reason, who, when), which every other Core sees; and the node's own Core locks it, stored, so a restart does not clear it. Either is enough: a node whose machine has disappeared is still marked at its parent (name `parentId` when the node cannot be reached), and a top node has only its own record.
+- **A suspended node refuses changes and work but stays readable.** Issuing IDs, gaining children, moving, rolling up, setting limits: all refused with `423 SUSPENDED`. Describing it, its list, walking the tree: all still work, and say why.
+- **Suspending a machine node locks its whole Core.** Every change and every request to do work is refused with `423 LOCKED`: reserving IDs, commands, executions, events, node changes. Reads still work, `GET /v1/core/health` says why (`shutdown`), check-ins still go out and are still answered, and `resume` still works. A locked Core fetches no new basis.
+- **Nodes below learn at their next check-in.** A parent's check-in reply carries the shutdown when the child is marked on its list or when the parent itself is shut down, so the child locks, learning it from its parent (`via: PARENT`). Each level passes it on at its own next check-in, so a suspended organization stops everything below it. When the parent no longer reports it, a lock learned that way clears at the next check-in.
+- **A lock from an order is kept** until a resume order clears it; a check-in never clears it.
+- **`resume`** clears the parent's mark and the node's own lock; nodes below unlock at their next check-in. A node that cannot be reached keeps its own lock until it is resumed again. A node locked only because an ancestor is suspended is resumed by resuming that ancestor (`stillLockedBy` says which).
+- **Who may do it, until signed orders exist.** `core.authority.suspend`: meant for the Console's application record, so any administrator can stop a node. `core.authority.resume`: held by nobody, granted by hand when needed and removed afterwards. Stopping is easy; restarting is harder. Between Cores, locking or marking needs `core.topology.write`; clearing needs `core.authority.resume` on the Core that clears.
+- Every suspend, resume, lock and unlock is audited.
+- Not built yet: refusing a node in conversations by its parent's mark when its own Core will not lock itself (needs signed requests); the immediate notice down the lists; retiring a machine that is offline; the Console screen.

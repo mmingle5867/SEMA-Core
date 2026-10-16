@@ -1,4 +1,4 @@
-import { requireMayHold, type CheckInAnswer, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType } from './local-nodes.js';
+import { requireMayHold, type CheckInAnswer, type ChildEntry, type KeyLimits, type NodeDescription, type NodeType, type Shutdown, type Suspension } from './local-nodes.js';
 
 /**
  * What one Core can do with a node it holds. `LocalNodes` implements this for the local machine;
@@ -20,6 +20,8 @@ export interface NodePeer {
   retire(id: string): Promise<{ parentId?: string; parentAddress?: string; children: ChildEntry[]; childListComplete: boolean }>;
   acceptRetired(input: { id: string; type: NodeType; replacementId: string; replacementAddress?: string }): Promise<NodeDescription>;
   checkIn(id: string, child: ChildEntry): Promise<CheckInAnswer>;
+  setShutdown(id: string, shutdown: Shutdown | null): Promise<NodeDescription>;
+  markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null): Promise<{ marked: boolean }>;
 }
 
 /**
@@ -54,6 +56,10 @@ export interface TreeNode {
   childListIncomplete?: true;
   /** In the global view, how many of an organization's children are not shown because they are inside it. */
   hiddenChildren?: number;
+  /** The mark on its parent's entry: this node has been suspended. */
+  suspension?: Suspension;
+  /** What the node's own record says: shut down itself, or locked because an ancestor is. */
+  shutdown?: Shutdown;
   stopped?: 'UNREACHABLE' | 'UNKNOWN' | 'ORGANIZATION' | 'RETIRED' | 'DEPTH' | 'LIMIT' | 'CYCLE';
   children: TreeNode[];
 }
@@ -182,12 +188,12 @@ export class Conversations {
     let count = 0;
     const visit = async (id: string, address: string | undefined, depth: number, entry?: ChildEntry): Promise<TreeNode> => {
       count += 1;
-      const base: TreeNode = { id, ...(entry?.type ? { type: entry.type } : {}), ...(address ? { address } : {}), ...(entry?.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}), children: [] };
+      const base: TreeNode = { id, ...(entry?.type ? { type: entry.type } : {}), ...(address ? { address } : {}), ...(entry?.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}), ...(entry?.suspension ? { suspension: entry.suspension } : {}), children: [] };
       if (seen.has(id)) return { ...base, stopped: 'CYCLE' };
       seen.add(id);
       const node = await this.describeNode(id, address);
       if (typeof node === 'string') return { ...base, stopped: node };
-      const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}) };
+      const shown: TreeNode = { ...base, type: node.type, status: node.status, childCount: node.childCount, ...(node.childListIncomplete ? { childListIncomplete: true as const } : {}), ...(node.shutdown ? { shutdown: node.shutdown } : {}) };
       if (node.status !== 'ACTIVE') return { ...shown, stopped: 'RETIRED' };
       if (depth > 0 && node.type === 'ORGANIZATION' && view === 'organization') return { ...shown, stopped: 'ORGANIZATION' };
       if (!node.childCount) return shown;
@@ -438,7 +444,79 @@ export class Conversations {
       const repaired = await this.repairParent(input.nodeId, input.nodeAddress);
       return { state: 'PARENT_RETIRED' as const, parentId, ...(repaired.changed ? { newParentId: repaired.parentId } : {}) };
     }
-    return { state: 'CHECKED_IN' as const, parentId, lastSeenAt: answer.lastSeenAt, ...(answer.added ? { addedToList: true as const } : {}) };
+    const lock = await this.applyParentShutdown(input.nodeId, input.nodeAddress, node.shutdown, answer.shutdown);
+    return { state: 'CHECKED_IN' as const, parentId, lastSeenAt: answer.lastSeenAt, ...(answer.added ? { addedToList: true as const } : {}), ...lock };
+  }
+
+  /**
+   * What a check-in reply means for the node's own lock. The parent reports a shutdown when this node is suspended on
+   * its list, or when the parent itself is shut down: the node then locks, learning it from its parent. When the parent
+   * reports nothing, a lock learned that way is cleared. A lock from an order sent to the node itself is kept: only a
+   * resume order clears it.
+   */
+  private async applyParentShutdown(nodeId: string, address: string | undefined, current: Shutdown | undefined, reported: Omit<Shutdown, 'via'> | undefined) {
+    if (current?.via === 'ORDER') return current ? { shutdown: current } : {};
+    if (reported) {
+      if (current && current.nodeId === reported.nodeId && current.at === reported.at) return { shutdown: current };
+      const shutdown: Shutdown = { ...reported, via: 'PARENT' };
+      await (await this.mustPeer(nodeId, 'The node', address)).setShutdown(nodeId, shutdown);
+      return { shutdown, locked: true as const };
+    }
+    if (current) {
+      await (await this.mustPeer(nodeId, 'The node', address)).setShutdown(nodeId, null);
+      return { unlocked: true as const };
+    }
+    return {};
+  }
+
+  /**
+   * Suspends a node: its parent's entry for it is marked, which is what every other Core sees, and the node's own Core
+   * is told to lock, which it stores so a restart does not clear it. Either is enough to go ahead: a node whose Core has
+   * disappeared is still marked at its parent, and a top node has only its own record. Nodes below lock at their next
+   * check-in. For a node that cannot be reached, the caller names its parent.
+   */
+  async suspend(input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string; reason: string; by?: string }) {
+    if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('A suspension needs a reason');
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    const reachable = typeof node !== 'string';
+    if (reachable && node.status !== 'ACTIVE') throw new Error(`Node is retired: ${input.nodeId}`);
+    const parentId = reachable ? node.parentId : input.parentId, parentAddress = reachable ? node.parentAddress : input.parentAddress;
+    if (parentId === input.nodeId) throw new Error('A node cannot be its own parent');
+    const at = new Date().toISOString(), reason = input.reason.trim();
+    const mark: Suspension = { reason, ...(input.by ? { by: input.by } : {}), at };
+    let parentMarked = false, nodeLocked = false;
+    if (parentId) {
+      const parent = await this.peer(parentId, parentAddress);
+      const sameCore = !parentAddress || parentAddress === input.nodeAddress;
+      if (parent) { await parent.markChild(parentId, { childId: input.nodeId, ...(reachable ? { type: node.type } : {}), ...(!sameCore && input.nodeAddress ? { address: input.nodeAddress } : {}) }, mark); parentMarked = true; }
+    }
+    if (reachable) {
+      await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setShutdown(input.nodeId, { nodeId: input.nodeId, ...mark, via: 'ORDER' });
+      nodeLocked = true;
+    }
+    if (!parentMarked && !nodeLocked) throw new Error(parentId ? `Neither ${input.nodeId} nor its parent ${parentId} could be reached; nothing was suspended` : `${input.nodeId} could not be reached. Name its parent (parentId) to mark it there`);
+    return { nodeId: input.nodeId, at, ...(parentId ? { parentId } : {}), parentMarked, nodeLocked };
+  }
+
+  /**
+   * Resumes a suspended node: the mark on its parent's entry is cleared and so is the node's own lock. Nodes below unlock
+   * at their next check-in. A node that cannot be reached keeps its own lock until it is resumed again; a node locked
+   * only because an ancestor is suspended is resumed by resuming that ancestor.
+   */
+  async resume(input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string }) {
+    const node = await this.describeNode(input.nodeId, input.nodeAddress);
+    const reachable = typeof node !== 'string';
+    const parentId = reachable ? node.parentId : input.parentId, parentAddress = reachable ? node.parentAddress : input.parentAddress;
+    let parentCleared = false, nodeCleared = false;
+    if (parentId) {
+      const parent = await this.peer(parentId, parentAddress);
+      if (parent) parentCleared = (await parent.markChild(parentId, { childId: input.nodeId }, null)).marked;
+    }
+    const shutdown = reachable ? node.shutdown : undefined;
+    if (shutdown && shutdown.nodeId !== input.nodeId) return { nodeId: input.nodeId, parentCleared, nodeCleared, stillLockedBy: shutdown.nodeId };
+    if (shutdown) { await (await this.mustPeer(input.nodeId, 'The node', input.nodeAddress)).setShutdown(input.nodeId, null); nodeCleared = true; }
+    if (!reachable && !parentCleared) throw new Error(parentId ? `Neither ${input.nodeId} nor its parent ${parentId} could be reached; nothing was resumed` : `${input.nodeId} could not be reached. Name its parent (parentId) to clear the mark there`);
+    return { nodeId: input.nodeId, parentCleared, nodeCleared, ...(reachable ? {} : { nodeUnreachable: true as const }) };
   }
 
   /** Sets, changes or clears an organization's key limits, on its organization node's own Core. */

@@ -52,11 +52,36 @@ export interface ChildEntry {
   address?: string;
   /** When the child last checked in with this parent. Empty until it has. Never the basis of a decision. */
   lastSeenAt?: string;
+  /** Present when the child has been suspended. */
+  suspension?: Suspension;
 }
 
-/** What a parent answers a child that checks in. A retired parent stamps nothing and names its own parent, so the child can follow the chain. */
+/** The mark a parent keeps on the entry of a child that has been suspended. Every other Core learns it there. */
+export interface Suspension {
+  reason: string;
+  /** Who gave the order, as Core knows the caller. */
+  by?: string;
+  at: string;
+}
+
+/**
+ * A node that is shut down: suspended itself (`nodeId` is its own ID) or locked because an ancestor is (`nodeId` is
+ * that ancestor). `via` says how the node learned it: by an order sent to it, which only a resume order clears, or
+ * from its parent at a check-in, which clears when the parent no longer reports it. A shut-down node refuses changes
+ * and work but stays readable.
+ */
+export interface Shutdown extends Suspension {
+  nodeId: string;
+  via: 'ORDER' | 'PARENT';
+}
+
+/**
+ * What a parent answers a child that checks in. A retired parent stamps nothing and names its own parent, so the child
+ * can follow the chain. `shutdown` is present when the child is suspended on this list, or when this parent is itself
+ * shut down, so the child locks too: that is how a suspension reaches everything below a node.
+ */
 export type CheckInAnswer =
-  | { status: 'ACTIVE'; lastSeenAt: string; added: boolean }
+  | { status: 'ACTIVE'; lastSeenAt: string; added: boolean; shutdown?: Omit<Shutdown, 'via'> }
   | { status: 'RETIRED'; parentId?: string; parentAddress?: string };
 
 /**
@@ -96,6 +121,8 @@ export interface LocalNode {
   type: NodeType;
   /** Set only on an organization node, and only when the organization chose limits. */
   keyLimits?: KeyLimits;
+  /** Set when the node is shut down, itself or because an ancestor is. */
+  shutdown?: Shutdown;
   parentId?: string;
   /** Where to reach the parent's Core, kept as a stable name. Set whenever the pointer is set. */
   parentAddress?: string;
@@ -138,7 +165,12 @@ export interface LocalNodeStore {
    * Stamps the time a child checked in on its entry. A child missing from the list is added: its own pointer says this
    * is its parent, and the list may hold too many entries, never too few. Only an active node may gain children.
    */
-  checkIn(id: string, child: ChildEntry, at: Date): Promise<{ added: boolean }>;
+  checkIn(id: string, child: ChildEntry, at: Date): Promise<{ added: boolean; suspension?: Suspension }>;
+  /**
+   * Sets or clears the suspension mark on a child's entry. Setting it on a child missing from the list adds the entry,
+   * when its type is known; clearing it never adds one. Says whether the entry is there.
+   */
+  markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null): Promise<boolean>;
 }
 
 export class InMemoryLocalNodeStore implements LocalNodeStore {
@@ -177,7 +209,20 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
     if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
     const list = this.lists.get(id)!, current = list.get(child.childId);
     list.set(child.childId, { ...(current ?? child), lastSeenAt: at.toISOString() });
-    return { added: !current };
+    return { added: !current, ...(current?.suspension ? { suspension: { ...current.suspension } } : {}) };
+  }
+  async markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) {
+    if (!this.nodes.has(id)) throw new Error(`Node does not exist on this Core: ${id}`);
+    const list = this.lists.get(id)!, current = list.get(child.childId);
+    if (!current) {
+      if (!suspension) return false;
+      if (!child.type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
+      list.set(child.childId, { childId: child.childId, type: child.type, ...(child.address ? { address: child.address } : {}), suspension: { ...suspension } });
+      return true;
+    }
+    const { suspension: _old, ...rest } = current;
+    list.set(child.childId, suspension ? { ...rest, suspension: { ...suspension } } : rest);
+    return true;
   }
 }
 
@@ -193,6 +238,8 @@ export interface NodeDescription {
   childListIncomplete?: true;
   /** Present only on an organization node that has chosen limits. Read by a roll-up walking up through it. */
   keyLimits?: KeyLimits;
+  /** Present when the node is shut down: suspended itself, or locked because an ancestor is. */
+  shutdown?: Shutdown;
   /** A basis fetched early and ready to take over, and the counter value after which it does. */
   nextBasis?: string;
   switchAt?: string;
@@ -281,7 +328,7 @@ export class LocalNodes {
   async issueChildId(id: string, child: { type: NodeType; address?: string }) {
     if (!isNodeType(child.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
     const value = await this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       requireMayHold(node, child);
       const next = advance(node);
       const childId = `${next.basis}-${encodeBase56(next.first)}`;
@@ -293,7 +340,7 @@ export class LocalNodes {
   /** Issues a fresh value that another node will adopt as its basis. It is not a child, so the list is unchanged. */
   issueBasis(id: string) {
     return this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       const next = advance(node);
       return { node: next.node, result: { value: `${next.basis}-${encodeBase56(next.first)}` } };
     });
@@ -301,7 +348,7 @@ export class LocalNodes {
 
   async setParent(id: string, parentId: string, parentAddress?: string) {
     const moved = await this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       if (parentId === id) throw new Error('A node cannot be its own parent');
       const { parentAddress: _old, ...rest } = node;
       const next: LocalNode = { ...rest, parentId, ...(parentAddress ? { parentAddress } : {}) };
@@ -313,7 +360,7 @@ export class LocalNodes {
   /** Adopts a shorter basis issued by a reachable ancestor. Only the basis and its counter change. */
   setBasis(id: string, basis: string) {
     return this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       if (segments(basis) >= segments(node.basis)) throw new Error('A roll-up must make the basis shorter');
       if (!basis.split('-').every(Boolean)) throw new Error('A basis must be hyphen-separated non-empty segments');
       const { nextBasis: _ready, switchAt: _at, ...rest } = node; // a ready basis was for the old one
@@ -331,7 +378,7 @@ export class LocalNodes {
     try { switchAt = BigInt(input.switchAt); } catch { throw new Error('switchAt must be a whole number'); }
     if (switchAt < BigInt(1)) throw new Error('switchAt must be a whole number of at least 1');
     const changed = await this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       if (input.basis === node.basis || input.basis.startsWith(`${node.basis}-`) || input.basis === id) throw new Error('A ready basis must be issued by an ancestor, not by the node itself');
       const next: LocalNode = node.nextBasis ? node : { ...node, nextBasis: input.basis, switchAt };
       return { node: next, result: next };
@@ -354,7 +401,7 @@ export class LocalNodes {
     if (entries.some((child) => child.childId === id)) throw new Error('A node cannot be its own child');
     const parent = await this.store.get(id);
     if (!parent) throw new Error(`Node does not exist on this Core: ${id}`);
-    this.requireActive(parent);
+    this.requireUsable(parent);
     for (const child of entries) requireMayHold(parent, child);
     await this.store.addChildren(id, entries);
     return { childCount: (await this.store.children(id)).length };
@@ -373,8 +420,43 @@ export class LocalNodes {
     if (parent.status !== 'ACTIVE') return { status: 'RETIRED', ...(parent.parentId ? { parentId: parent.parentId } : {}), ...(parent.parentAddress ? { parentAddress: parent.parentAddress } : {}) };
     requireMayHold(parent, checked);
     const at = new Date();
-    const { added } = await this.store.checkIn(id, checked, at);
-    return { status: 'ACTIVE', lastSeenAt: at.toISOString(), added };
+    const { added, suspension } = await this.store.checkIn(id, checked, at);
+    const above = parent.shutdown;
+    const shutdown = suspension ? { nodeId: checked.childId, ...suspension } : above ? { nodeId: above.nodeId, reason: above.reason, ...(above.by ? { by: above.by } : {}), at: above.at } : undefined;
+    return { status: 'ACTIVE', lastSeenAt: at.toISOString(), added, ...(shutdown ? { shutdown } : {}) };
+  }
+
+  /**
+   * Shuts this node down, or clears it with null. A retired node is not changed. The record keeps the reason, who and
+   * when, so a shut-down node can always say why it is not working.
+   */
+  async setShutdown(id: string, shutdown: Shutdown | null) {
+    if (shutdown) {
+      if (!validId(shutdown.nodeId)) throw new Error('A shutdown must name the node that was suspended');
+      if (typeof shutdown.reason !== 'string' || !shutdown.reason.trim()) throw new Error('A suspension needs a reason');
+      if (shutdown.via !== 'ORDER' && shutdown.via !== 'PARENT') throw new Error('via must be ORDER or PARENT');
+      if (Number.isNaN(Date.parse(shutdown.at))) throw new Error('at must be a time');
+    }
+    const changed = await this.store.mutate(id, (node) => {
+      this.requireActive(node);
+      const { shutdown: _old, ...rest } = node;
+      const next: LocalNode = shutdown ? { ...rest, shutdown: { nodeId: shutdown.nodeId, reason: shutdown.reason.trim(), ...(shutdown.by ? { by: shutdown.by } : {}), at: new Date(shutdown.at).toISOString(), via: shutdown.via } } : rest;
+      return { node: next, result: next };
+    });
+    return this.describeNode(changed, (await this.store.children(id)).length);
+  }
+
+  /** Marks a child on this node's list as suspended, or clears the mark with null. This mark is what every other Core sees. */
+  async markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) {
+    if (!validId(child.childId)) throw new Error('A child ID must be hyphen-separated non-empty segments');
+    if (child.type !== undefined && !isNodeType(child.type)) throw new Error(`A node type must be ${TYPE_LIST}`);
+    if (suspension && (typeof suspension.reason !== 'string' || !suspension.reason.trim())) throw new Error('A suspension needs a reason');
+    if (suspension && Number.isNaN(Date.parse(suspension.at))) throw new Error('at must be a time');
+    const parent = await this.store.get(id);
+    if (!parent) throw new Error(`Node does not exist on this Core: ${id}`);
+    if (suspension && child.type) requireMayHold(parent, { childId: child.childId, type: child.type });
+    const marked = await this.store.markChild(id, child, suspension ? { reason: suspension.reason.trim(), ...(suspension.by ? { by: suspension.by } : {}), at: new Date(suspension.at).toISOString() } : null);
+    return { marked };
   }
 
   /** Takes one child off a node's list. */
@@ -393,7 +475,7 @@ export class LocalNodes {
   async setKeyLimits(id: string, input: KeyLimits | null) {
     const limits = checkKeyLimits(input);
     const changed = await this.store.mutate(id, (node) => {
-      this.requireActive(node);
+      this.requireUsable(node);
       if (node.type !== 'ORGANIZATION') throw new Error(`Key limits must be set on an organization node, and ${id} is ${a(node.type)}`);
       const { keyLimits: _old, ...rest } = node;
       const next: LocalNode = hasLimits(limits) ? { ...rest, keyLimits: limits } : rest;
@@ -415,7 +497,12 @@ export class LocalNodes {
   }
 
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
+  /** Active and not shut down: what every change to a node, and all work from it, needs. */
+  private requireUsable(node: LocalNode) {
+    this.requireActive(node);
+    if (node.shutdown) throw new Error(`Node is suspended: ${node.id}${node.shutdown.nodeId === node.id ? '' : ` (because ${node.shutdown.nodeId} is suspended)`}. Reason: ${node.shutdown.reason}`);
+  }
   private describeNode(node: LocalNode, childCount: number): NodeDescription {
-    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), ...(node.nextBasis && node.switchAt !== undefined ? { nextBasis: node.nextBasis, switchAt: node.switchAt.toString() } : {}), status: node.status };
+    return { id: node.id, type: node.type, ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), basis: node.basis, childCount, ...(node.childListComplete ? {} : { childListIncomplete: true as const }), ...(hasLimits(node.keyLimits) ? { keyLimits: { ...node.keyLimits } } : {}), ...(node.shutdown ? { shutdown: { ...node.shutdown } } : {}), ...(node.nextBasis && node.switchAt !== undefined ? { nextBasis: node.nextBasis, switchAt: node.switchAt.toString() } : {}), status: node.status };
   }
 }

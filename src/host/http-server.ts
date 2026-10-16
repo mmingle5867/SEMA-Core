@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
+import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostValidationError } from './errors.js';
 import type { CoreHostSettings } from './types.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import { SemaCoreHost } from './sema-core-host.js';
@@ -66,9 +66,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 function classify(error: unknown): { status: number; code: string; message: string } {
   if (error instanceof HttpRequestError) return { status: error.status, code: error.code, message: error.message };
   if (error instanceof CoreHostAuthorizationError) return { status: 403, code: 'FORBIDDEN', message: error.message };
+  if (error instanceof CoreHostLockedError) return { status: 423, code: 'LOCKED', message: error.message };
   if (error instanceof CoreHostValidationError) return { status: 400, code: 'INVALID_REQUEST', message: error.message };
   const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
   // Errors raised by custom authorization or store implementations are still recognised by message.
+  if (/^Node is suspended/.test(message)) return { status: 423, code: 'SUSPENDED', message };
   const status = /not authorized/i.test(message) ? 403 : /JSON|Request body|must be|cannot exceed|cannot sit under|no children in the tree|is already a node/i.test(message) ? 400 : 500;
   return { status, code: status === 403 ? 'FORBIDDEN' : status === 400 ? 'INVALID_REQUEST' : 'CORE_HOST_ERROR', message };
 }
@@ -130,6 +132,10 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as Parameters<typeof host.topologyInsertAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/add-parent-above') return write(response, 201, await host.topologyAddParentAbove(context, await readJson(request) as Parameters<typeof host.topologyAddParentAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await readJson(request) as Parameters<typeof host.topologyReplaceLost>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/suspend') return write(response, 200, await host.topologySuspend(context, await readJson(request) as Parameters<typeof host.topologySuspend>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/resume') return write(response, 200, await host.topologyResume(context, await readJson(request) as Parameters<typeof host.topologyResume>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/shutdown') return write(response, 200, await host.nodeSetShutdown(context, await readJson(request) as Parameters<typeof host.nodeSetShutdown>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/mark-child') return write(response, 200, await host.nodeMarkChild(context, await readJson(request) as Parameters<typeof host.nodeMarkChild>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/check-in') return write(response, 200, await host.nodeCheckIn(context, await readJson(request) as Parameters<typeof host.nodeCheckIn>[1]));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/check-in-status') return write(response, 200, await host.topologyCheckInStatus(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-in') return write(response, 200, await host.topologyCheckIn(context));

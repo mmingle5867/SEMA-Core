@@ -1,10 +1,10 @@
 import type { SemaCore } from '../core/sema-core.js';
 import { SEMA_CORE_VERSION } from '../version.js';
-import { CoreHostAuthorizationError, CoreHostValidationError } from './errors.js';
+import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostValidationError } from './errors.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CheckInRun, CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
-import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType } from '../topology/local-nodes.js';
+import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType, type Shutdown, type Suspension } from '../topology/local-nodes.js';
 import { Conversations, limitNotes, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 import { encodeBase56 } from '../identity/base56.js';
 import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './install-code.js';
@@ -70,7 +70,8 @@ export class SemaCoreHost {
   async health(context: CoreHostRequestContext) {
     await this.requireRead(context, 'core.health.read');
     const statistics = await this.store.getHostStatistics();
-    return { status: statistics.status, installationId: statistics.installationId, version: this.version, capturedAt: statistics.capturedAt };
+    const shutdown = await this.lockedBy();
+    return { status: statistics.status, installationId: statistics.installationId, version: this.version, capturedAt: statistics.capturedAt, ...(shutdown ? { shutdown } : {}) };
   }
 
   async getSettings(context: CoreHostRequestContext) {
@@ -186,6 +187,10 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/key-limits', purpose: 'Set, change or clear an organization\'s optional key limits: maxSegments, maxSegmentLength, maxLastSegmentLength. A roll-up may leave the organization only when the basis has more segments than maxSegments.' },
         { method: 'POST', path: '/v1/core/topology/nodes/key-limits', purpose: 'Set, change or clear the key limits on an organization node held here. Used between Cores during key-limits.' },
         { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
+        { method: 'POST', path: '/v1/core/topology/suspend', purpose: 'Suspend a node: its parent marks it, and its own Core locks itself and stays readable. Suspending a machine node locks that whole Core. Nodes below lock at their next check-in. Needs core.authority.suspend.' },
+        { method: 'POST', path: '/v1/core/topology/resume', purpose: 'Resume a suspended node: clear its parent\'s mark and its own lock. Nodes below unlock at their next check-in. Needs core.authority.resume.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/shutdown', purpose: 'Lock a node held here, or clear its lock (null). Used between Cores; clearing needs core.authority.resume.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/mark-child', purpose: 'Mark a child on a node\'s list as suspended, or clear the mark (null). Used between Cores; clearing needs core.authority.resume.' },
         { method: 'POST', path: '/v1/core/topology/nodes/check-in', purpose: 'A child checks in with a node held here, its parent: the time is stamped on its entry, which is added if missing. A retired parent answers with its own pointer. Used between Cores.' },
         { method: 'GET', path: '/v1/core/topology/check-in-status', purpose: 'The last round of check-ins by the nodes this Core holds, each with its own parent, or null before the first round.' },
         { method: 'POST', path: '/v1/core/topology/check-in', purpose: 'Check in now: every active node this Core holds checks in with its own parent. Returns the report.' },
@@ -292,8 +297,8 @@ export class SemaCoreHost {
   private keyLimits(value: unknown) { try { return checkKeyLimits(value); } catch (error) { throw new CoreHostValidationError(error instanceof Error ? error.message : 'Invalid key limits'); } }
   private text(value: unknown, name: string) { if (typeof value !== 'string' || !value.trim()) throw new CoreHostValidationError(`${name} must be a non-empty string`); return value.trim(); }
   private nodeType(value: unknown): NodeType { if (!isNodeType(value)) throw new CoreHostValidationError('type must be ORGANIZATION, GROUP, SITE, USER or MACHINE'); return value; }
-  private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
-    await this.requireAdministration(context, permission);
+  private async nodeChange<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (nodes: LocalNodes) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write', whileLocked = false) {
+    await this.requireAdministration(context, permission, whileLocked);
     const result = await work(this.requireNodes());
     await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
     return result;
@@ -324,10 +329,33 @@ export class SemaCoreHost {
   async nodeCheckIn(context: CoreHostRequestContext, input: { nodeId: string; childId: string; type: NodeType; address?: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId'), childId = this.text(input.childId, 'childId'), type = this.nodeType(input.type);
     const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
-    await this.requireAdministration(context, 'core.topology.write');
+    await this.requireAdministration(context, 'core.topology.write', true); // a locked Core still answers, so its children learn it
     const answer = await this.requireNodes().checkIn(nodeId, { childId, type, ...(address ? { address } : {}) });
     if (answer.status === 'ACTIVE' && answer.added) await this.core.recordAudit({ action: 'core.topology.child-added-by-check-in', actorId: context.actorId, subjectIds: [nodeId, childId], evidence: { type } });
     return answer;
+  }
+  private shutdownInput(value: unknown): Shutdown | null {
+    if (value === null || value === undefined) return null;
+    const v = value as Partial<Shutdown>;
+    if (typeof v !== 'object' || v.via !== 'ORDER' && v.via !== 'PARENT') throw new CoreHostValidationError('shutdown must be null or { nodeId, reason, by?, at, via: ORDER or PARENT }');
+    return { nodeId: this.text(v.nodeId, 'shutdown.nodeId'), reason: this.text(v.reason, 'shutdown.reason'), ...(typeof v.by === 'string' && v.by ? { by: v.by } : {}), at: this.text(v.at, 'shutdown.at'), via: v.via };
+  }
+  private suspensionInput(value: unknown): Suspension | null {
+    if (value === null || value === undefined) return null;
+    const v = value as Partial<Suspension>;
+    return { reason: this.text(v.reason, 'suspension.reason'), ...(typeof v.by === 'string' && v.by ? { by: v.by } : {}), at: this.text(v.at, 'suspension.at') };
+  }
+  /** Locks a node held here, or clears its lock. Another Core asks this while suspending, resuming or checking in. Locking leans the safe way; clearing needs the resume permission. */
+  nodeSetShutdown(context: CoreHostRequestContext, input: { nodeId: string; shutdown?: unknown }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), shutdown = this.shutdownInput(input.shutdown);
+    return this.nodeChange(context, shutdown ? 'core.topology.node-locked' : 'core.topology.node-unlocked', [nodeId, ...(shutdown && shutdown.nodeId !== nodeId ? [shutdown.nodeId] : [])], (nodes) => nodes.setShutdown(nodeId, shutdown), (): JsonObject => (shutdown ? { reason: shutdown.reason, via: shutdown.via } : {}), shutdown ? 'core.topology.write' : 'core.authority.resume', true);
+  }
+  /** Marks a child on a node's list as suspended, or clears the mark. Another Core asks this while suspending or resuming. */
+  nodeMarkChild(context: CoreHostRequestContext, input: { nodeId: string; childId: string; type?: NodeType; address?: string; suspension?: unknown }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), childId = this.text(input.childId, 'childId'), suspension = this.suspensionInput(input.suspension);
+    const type = input.type === undefined || input.type === null ? undefined : this.nodeType(input.type);
+    const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
+    return this.nodeChange(context, suspension ? 'core.topology.child-marked-suspended' : 'core.topology.child-mark-cleared', [nodeId, childId], (nodes) => nodes.markChild(nodeId, { childId, ...(type ? { type } : {}), ...(address ? { address } : {}) }, suspension), (result) => ({ marked: result.marked }), suspension ? 'core.topology.write' : 'core.authority.resume', true);
   }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
 
@@ -345,8 +373,8 @@ export class SemaCoreHost {
     if (!peer) throw new CoreHostValidationError(`The Core at ${address} is not reachable`);
     return peer;
   }
-  private async conversation<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (talk: Conversations) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write') {
-    await this.requireAdministration(context, permission);
+  private async conversation<T>(context: CoreHostRequestContext, action: string, subjectIds: string[], work: (talk: Conversations) => Promise<T>, evidence: (result: T) => JsonObject = () => ({}), permission = 'core.topology.write', whileLocked = false) {
+    await this.requireAdministration(context, permission, whileLocked);
     const result = await work(this.conversations());
     await this.core.recordAudit({ action, actorId: context.actorId, subjectIds, evidence: evidence(result) });
     return result;
@@ -478,6 +506,30 @@ export class SemaCoreHost {
     if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false');
     return this.conversation(context, 'core.topology.child-list-marked', [nodeId], (talk) => talk.markChildList({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), complete: input.complete }), () => ({ complete: input.complete }));
   }
+  /**
+   * Suspends a node, here or on another machine: its parent marks it and its own Core locks. One administrator may do
+   * it, and it is allowed even on a locked Core: stopping is easy. The reason is required and kept with the record.
+   */
+  topologySuspend(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string; reason: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), reason = this.text(input.reason, 'reason');
+    const parentId = input.parentId === undefined || input.parentId === null || input.parentId === '' ? undefined : this.text(input.parentId, 'parentId');
+    return this.conversation(context, 'core.topology.node-suspended', [nodeId], (talk) => talk.suspend({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}), reason, ...(context.actorId ? { by: context.actorId } : {}) }), (result) => ({ reason, parentMarked: result.parentMarked, nodeLocked: result.nodeLocked }), 'core.authority.suspend', true);
+  }
+  /** Resumes a suspended node. Restarting is harder than stopping, so it has its own permission, held by nobody by default. */
+  topologyResume(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId?: string; parentAddress?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    const parentId = input.parentId === undefined || input.parentId === null || input.parentId === '' ? undefined : this.text(input.parentId, 'parentId');
+    return this.conversation(context, 'core.topology.node-resumed', [nodeId], (talk) => talk.resume({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}) }), (result) => ({ parentCleared: result.parentCleared, nodeCleared: result.nodeCleared }), 'core.authority.resume', true);
+  }
+
+  private machineNodeId: string | undefined;
+  /** What this Core's own machine node says about being shut down, or undefined. Read each time: never cached. */
+  private async lockedBy(): Promise<Shutdown | undefined> {
+    if (!this.localNodes) return undefined;
+    this.machineNodeId ??= (await this.store.getHostStatistics()).installationId;
+    return (await this.localNodes.describe(this.machineNodeId))?.shutdown;
+  }
+
   private lastCheckIns: CheckInRun | undefined;
   private checkInIntervalSeconds = 0;
   /**
@@ -495,6 +547,8 @@ export class SemaCoreHost {
       try {
         const result = await talk.checkIn({ nodeId: node.id, nodeAddress: address });
         if (result.state === 'RETIRED') continue;
+        if ('locked' in result && result.locked) await this.core.recordAudit({ action: 'core.topology.node-locked', actorId, subjectIds: [node.id, result.shutdown.nodeId], evidence: { reason: result.shutdown.reason, via: 'PARENT' } });
+        if ('unlocked' in result && result.unlocked) await this.core.recordAudit({ action: 'core.topology.node-unlocked', actorId, subjectIds: [node.id], evidence: { via: 'PARENT' } });
         if (result.state === 'PARENT_RETIRED' && result.newParentId) await this.core.recordAudit({ action: 'core.topology.parent-repaired', actorId, subjectIds: [node.id, result.newParentId], evidence: { retiredParentId: result.parentId, by: 'check-in' } });
         nodes.push({ nodeId: node.id, ...result });
       } catch (error) {
@@ -528,6 +582,7 @@ export class SemaCoreHost {
   async runKeyLimitCheck(actorId: string | null = null): Promise<KeyLimitCheck> {
     const checkedAt = new Date().toISOString();
     if (!this.localNodes || !this.topology) return (this.lastKeyLimitCheck = { checkedAt, nodes: [], note: 'Core-to-Core conversations are not configured on this Core' });
+    if (await this.lockedBy()) return (this.lastKeyLimitCheck = { checkedAt, nodes: [], note: 'This Core is shut down, so it fetches no new basis' });
     const talk = this.conversations(), address = this.ownAddress();
     const nodes: KeyLimitCheck['nodes'] = [];
     for (const node of await this.localNodes.counters()) {
@@ -584,7 +639,15 @@ export class SemaCoreHost {
     if (!(await this.authorization.canRead({ actorId: context.actorId, resource }))) throw new CoreHostAuthorizationError(`Core Host ${resource} access is not authorized`);
   }
 
-  private async requireAdministration(context: CoreHostRequestContext, resource: string) {
+  /**
+   * Every change and every request to do work comes through here. A Core whose own machine node is suspended refuses
+   * them, except the few that let it be resumed and let its children learn it is shut down. Reads still work.
+   */
+  private async requireAdministration(context: CoreHostRequestContext, resource: string, whileLocked = false) {
+    if (!whileLocked) {
+      const shutdown = await this.lockedBy();
+      if (shutdown) throw new CoreHostLockedError(`This Core is shut down${shutdown.nodeId === this.machineNodeId ? '' : ` because ${shutdown.nodeId} is suspended`}: ${shutdown.reason}. It refuses changes and work until it is resumed, and stays readable`);
+    }
     if (!(await this.authorization.canAdminister({ actorId: context.actorId, resource }))) throw new CoreHostAuthorizationError(`Core Host ${resource} administration is not authorized`);
   }
 }

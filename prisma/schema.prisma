@@ -175,6 +175,13 @@ model SemaLocalNode {
   /// A basis fetched early, ready to take over when the counter would pass switchAt. Both set, or neither.
   nextBasis            String?
   switchAt             BigInt?
+  /// Set when the node is shut down: the node that was suspended (this one or an ancestor), why, by whom, when, and
+  /// how this node learned it (ORDER or PARENT). All set, or none. Times are UTC.
+  shutdownNodeId       String?
+  shutdownReason       String?
+  shutdownBy           String?
+  shutdownAt           DateTime?
+  shutdownVia          String?
   status     String   @default("ACTIVE")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -192,6 +199,10 @@ model SemaLocalNodeChild {
   childAddress String?
   addedAt      DateTime @default(now())
   lastSeenAt   DateTime?
+  /// Set when the child has been suspended: the mark every other Core sees. Times are UTC.
+  suspendedReason String?
+  suspendedBy     String?
+  suspendedAt     DateTime?
 
   @@id([parentId, childId])
   @@map("sema_local_node_children")
