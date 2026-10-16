@@ -10,6 +10,7 @@ stored beside each parent pointer.
 | --- | --- |
 | `SEMA_CORE_ADDRESS` | The stable name other Cores use to reach this one, e.g. `http://neo-main:4310`. Stored beside every pointer to a node held here. Leave unset on a single-machine setup. |
 | `SEMA_CORE_PEER_APPLICATION_KEY`, `SEMA_CORE_PEER_SECRET` | The shared application credential presented to other Cores. It must be registered in each Core's `SEMA_APPLICATION_CLIENTS_JSON`. Later replaced by per-machine keys. |
+| `SEMA_CORE_KEY_FILE` | Where this machine's private key is kept. Default `keys/machine-key.dpapi` on Windows (encrypted by Windows for the account Core runs as) or `keys/machine-key.pem` elsewhere (readable only by that account), in Core's folder. Made on the first start. Never commit it or copy it to another machine. Optional. |
 | `SEMA_CORE_CHECK_IN_SECONDS` | How often each node held here checks in with its own parent (see "Check-ins"). Set by this Core's administrator. Default 300 seconds; 0 turns it off. Optional. |
 | `SEMA_CORE_KEY_LIMIT_CHECK_SECONDS` | How often the key-limit check runs (see "Key limits"). Default 300 seconds; 0 turns it off. Optional. |
 
@@ -239,3 +240,13 @@ SEMA's own seats count named users and devices (design doc section 5, D-128): a 
 - **A new organization** inserted above existing nodes (`insert-above`, `add-parent-above`) starts with a recount of what is below it.
 - **`recount-seats`** walks down the organization's lists: its own users and machines, wherever they are below it, plus each division's own counts. Retired records are not counted; a user or machine that does not answer still is. When every part answered the count is set as found; otherwise a count is only raised. Nodes created before seats existed start at zero until recounted.
 - **`seat-limits`** needs `core.authority.seats`, held by nobody by default (the level above sets an organization's seats; signed orders come later). A division cannot allow more than its nearest parent organization; the divisions' numbers need not add up to it, because the parent counts everyone below it anyway.
+
+## Signed requests
+
+Keys and signed requests, stage (a) of replacing the shared key and secret (design doc section 6, D-120 to D-123).
+
+- **The machine key.** Each Core has its own P-256 key pair, made on the first start and kept through one small key-store interface (`SEMA_CORE_KEY_FILE`). Its public half is at `GET /v1/core/keys` (`keyId`, `alg`, `publicKey` as a JWK). The key ID is the key's JWK thumbprint (RFC 7638). Core-to-Core requests start using it in stage (b).
+- **Signed requests (RFC 9421).** A request signs `@method`, `@authority`, `@path` and `@query`, and `content-digest` (SHA-256 of the body, RFC 9530) when it has a body, labelled `sema`, with `created`, `keyid`, a `nonce` and `alg="ecdsa-p256-sha256"`. Core refuses a signature older than 60 seconds, made in the future, made with an unknown or revoked key, missing a required part, or whose nonce it has already seen. The signing helper is `signRequest` in the Core package. The signature base and the P-256 check are tested against RFC 9421's own examples (Figure 1 and B.2.4).
+- **Registering a program's key.** A program registers its own public key with `POST /v1/core/keys/clients` `{publicKey, proof}`, proving who it is the old way (key and secret, or a key registered before), and proving it holds the new private key: `proof` is the base64 P-256 signature (64 bytes, r||s) of the three lines `sema-key-registration`, its application key and the key's ID. A program can register keys only for itself; `GET /v1/core/keys/clients` lists its own, and `POST /v1/core/keys/clients/revoke` `{keyId}` revokes one. From then on its signed requests need no secret.
+- **Both ways are accepted until every program signs.** A request with a `Signature-Input` header is checked as signed; any other still needs the key and secret. Stage (b) moves each caller over; stage (c) stops accepting secrets.
+- Not built yet: Core-to-Core signing and pinning the other Core's key at the handshake; the nonce memory is kept in memory only, so a request copied in the last 60 seconds before a restart could be replayed once just after it.

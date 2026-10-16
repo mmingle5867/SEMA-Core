@@ -9,6 +9,10 @@ import { SemaCoreHost } from './sema-core-host.js';
 import { SEMA_CORE_VERSION } from '../version.js';
 import { SemaCore } from '../core/sema-core.js';
 import { resolveStart, startJoinServer } from './join.js';
+import { join } from 'node:path';
+import { FileKeyStore } from '../keys/machine-key.js';
+import { PrismaClientKeyStore } from '../keys/client-keys.js';
+import { NonceMemory } from '../keys/signatures.js';
 
 const port = Number(process.env.SEMA_CORE_PORT ?? '4310');
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('SEMA_CORE_PORT must be a valid port');
@@ -51,7 +55,12 @@ const topology = peerKey && peerSecret
   ? { address: ownAddress, peers: new HttpPeerDirectory({ credentials: { applicationKey: peerKey, secret: peerSecret }, local: { address: ownAddress ?? '', peer: localNodes } }), joining: joiningPeer }
   : undefined;
 if (!topology) console.warn('SEMA_CORE_PEER_APPLICATION_KEY / SEMA_CORE_PEER_SECRET are not set: this Core cannot hold conversations with other Cores.');
-const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology);
+// This machine's own key (D-121, D-122): made on the first start, kept in a file encrypted by Windows for this account,
+// or readable only by this account elsewhere. SEMA_CORE_KEY_FILE says where; it must never be committed or copied.
+const keyFile = process.env.SEMA_CORE_KEY_FILE ?? join(process.cwd(), 'keys', process.platform === 'win32' ? 'machine-key.dpapi' : 'machine-key.pem');
+const machineKey = await new FileKeyStore(keyFile).open();
+console.log(`Machine key ${machineKey.keyId}`);
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology, { machine: machineKey, clients: new PrismaClientKeyStore(prisma), nonces: new NonceMemory() });
 
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname, port, applicationClients: clients });
