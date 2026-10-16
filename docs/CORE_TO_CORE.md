@@ -37,6 +37,8 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/mark-child-list` `{nodeId, nodeAddress?, complete}` | An administrator says whether a node's list of children is complete. |
 | `POST /v1/core/topology/suspend` `{nodeId, nodeAddress?, parentId?, parentAddress?, reason}` | Suspends a node. Needs `core.authority.suspend`. See "Suspending a node". |
 | `POST /v1/core/topology/resume` `{nodeId, nodeAddress?, parentId?, parentAddress?}` | Resumes a suspended node. Needs `core.authority.resume`. |
+| `POST /v1/core/topology/seat-limits` `{nodeId, nodeAddress?, users?, machines?}` | Sets or clears (null) an organization's allowed numbers of seats. Needs `core.authority.seats`. See "Seats". |
+| `POST /v1/core/topology/recount-seats` `{nodeId, nodeAddress?}` | Counts an organization's seats again. See "Seats". |
 | `POST /v1/core/topology/retire-away` `{nodeId, nodeAddress?, parentId, parentAddress?, reason}` | Retires a user or machine that cannot be reached, for good. Needs `core.authority.retire`. See "Suspending a node". |
 | `POST /v1/core/topology/check-in` | Check in now: every active node this Core holds checks in with its own parent. Returns the report. See "Check-ins". |
 | `GET /v1/core/topology/check-in-status` | The last round's report, or `null` before the first. Needs `core.topology.read`. |
@@ -226,3 +228,14 @@ The first piece of shutting down a Core (design doc section 8): suspend, which c
 - Every suspend, resume, lock and unlock is audited.
 - **Retiring for good.** A node that can be reached is retired with `remove`. A user or machine that cannot be reached is retired with `retire-away`: its parent keeps the entry, marked retired, as the record that refuses it. The entry no longer counts as a child, the tree shows it as retired, and the notice and check-children pass it by. If the machine ever comes back, its check-in is answered with that and it retires its own record (`RETIRED_WHILE_AWAY`, audited); its ID is never used again. Anything other than a user or machine is refused, because its own list of children is on its machine. It needs `core.authority.retire`, held by nobody by default: retiring takes more authority than suspending.
 - Not built yet: refusing a node in conversations by its parent's mark when its own Core will not lock itself (needs signed requests); the single-node routes between Cores (`/v1/core/topology/nodes/...`) still need only `core.topology.write`; they are for trusted Cores and are not passed through by the Console.
+
+## Seats
+
+SEMA's own seats count named users and devices (design doc section 5, D-128): a user seat for each `USER` node and a physical seat for each `MACHINE` node in an organization. They are held on organization nodes, in use and allowed; no allowed number means no limit. Signing in does not touch them.
+
+- **Every organization above counts.** Adding a user or machine (create, install a machine, adopt an issued ID) takes a seat in its own organization and in every organization above it, before any ID is issued. If one is full the add is refused with `409 NO_SEAT`, and seats already taken on the way are given back; if one cannot be reached, nothing is added.
+- **Removing gives the seat back:** `remove`, `retire-away`, and `replace-lost` for the lost node when its parent is named. An organization that cannot be reached at that moment keeps its count, too high, which is the safe way; a recount puts it right.
+- **Moving.** A user or machine moved into another organization takes a seat there and gives one back in the organization it left; a move inside one organization changes nothing. A division moves with its own counts. A group or site moved into a different organization (a division included) is refused for now: what is below it would have to be counted; that comes with the structured join.
+- **A new organization** inserted above existing nodes (`insert-above`, `add-parent-above`) starts with a recount of what is below it.
+- **`recount-seats`** walks down the organization's lists: its own users and machines, wherever they are below it, plus each division's own counts. Retired records are not counted; a user or machine that does not answer still is. When every part answered the count is set as found; otherwise a count is only raised. Nodes created before seats existed start at zero until recounted.
+- **`seat-limits`** needs `core.authority.seats`, held by nobody by default (the level above sets an organization's seats; signed orders come later). A division cannot allow more than its nearest parent organization; the divisions' numbers need not add up to it, because the parent counts everyone below it anyway.

@@ -66,7 +66,7 @@ try {
   // Every type is stored and read back, and a node cannot be recorded without one.
   for (const [id, type] of [['3-T1', 'ORGANIZATION'], ['3-T2', 'GROUP'], ['3-T3', 'USER'], ['3-T4', 'MACHINE'], ['3-T6', 'SITE']] as const) {
     await nodes.accept({ id, type, parentId: '3', parentAddress: 'http://parent.example:4310' });
-    assert.deepEqual(await nodes.describe(id), { id, type, parentId: '3', parentAddress: 'http://parent.example:4310', basis: id, childCount: 0, status: 'ACTIVE' });
+    assert.deepEqual(await nodes.describe(id), { id, type, parentId: '3', parentAddress: 'http://parent.example:4310', basis: id, childCount: 0, ...(type === 'ORGANIZATION' ? { seats: { users: { used: 0 }, machines: { used: 0 } } } : {}), status: 'ACTIVE' });
   }
   await assert.rejects(() => nodes.accept({ id: '3-T5' } as never), /ORGANIZATION, GROUP, SITE, USER or MACHINE/);
   await assert.rejects(() => nodes.accept({ id: '3-T3', type: 'USER' }), /already exists/);
@@ -78,6 +78,18 @@ try {
   assert.deepEqual((await nodes.setKeyLimits('3-T1', { maxSegments: 4, maxLastSegmentLength: 6 })).keyLimits, { maxSegments: 4, maxLastSegmentLength: 6 });
   assert.deepEqual((await nodes.describe('3-T1'))!.keyLimits, { maxSegments: 4, maxLastSegmentLength: 6 });
   assert.equal((await nodes.describe('3-T2'))!.keyLimits, undefined);
+
+  // Seats are stored on an organization node, in use and allowed, and kept through other changes.
+  assert.deepEqual((await nodes.describe('3-T1'))!.seats, { users: { used: 0 }, machines: { used: 0 } });
+  await nodes.setSeatLimits('3-T1', { users: 3 });
+  assert.deepEqual(await nodes.changeSeats('3-T1', { users: 2, machines: 1 }), { users: { used: 2, allowed: 3 }, machines: { used: 1 } });
+  await assert.rejects(() => nodes.changeSeats('3-T1', { users: 2 }), /No user seat left in 3-T1: 2 of 3 in use/);
+  assert.deepEqual(await nodes.changeSeats('3-T1', { users: -1, machines: -5 }), { users: { used: 1, allowed: 3 }, machines: { used: 0 } }, 'giving back never goes below zero');
+  assert.deepEqual(await nodes.setSeatsUsed('3-T1', { users: 0, machines: 4 }, false), { users: { used: 1, allowed: 3 }, machines: { used: 4 } }, 'an incomplete recount only raises');
+  await nodes.setSeatsUsed('3-T1', { users: 0, machines: 0 }, true);
+  await nodes.setSeatLimits('3-T1', { users: null });
+  assert.equal((await nodes.describe('3-T2'))!.seats, undefined, 'only an organization node has seats');
+  await assert.rejects(() => nodes.changeSeats('3-T2', { users: 1 }), /Seats are held on an organization node/);
 
   // Changes keep the type: issuing, moving, rolling up and retiring.
   assert.deepEqual(await nodes.issueChildId('3-T1', { type: 'GROUP', address: 'http://child.example:4310' }), { value: '3-T1-3', childCount: 1 });
@@ -95,7 +107,7 @@ try {
   await nodes.setChildListComplete('3-T2', true);
   assert.equal((await nodes.describe('3-T2'))!.childListIncomplete, undefined);
   assert.deepEqual(await nodes.retire('3-T1'), { parentId: '3', parentAddress: 'http://parent.example:4310', children: [{ childId: '3-T3', type: 'USER' }], childListComplete: true });
-  assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, keyLimits: { maxSegments: 4, maxLastSegmentLength: 6 }, status: 'RETIRED' }, 'a retired node keeps its list, and its limits survived every change');
+  assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, keyLimits: { maxSegments: 4, maxLastSegmentLength: 6 }, seats: { users: { used: 0 }, machines: { used: 0 } }, status: 'RETIRED' }, 'a retired node keeps its list, and its limits survived every change');
   await assert.rejects(() => nodes.addChildren('3-T1', [{ childId: '3-T8', type: 'USER' }]), /retired/);
 
   // A check-in stamps the time on the child's entry, adding the entry if it was missing; a retired parent stamps nothing.

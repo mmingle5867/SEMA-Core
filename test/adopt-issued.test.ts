@@ -36,11 +36,12 @@ granted.add('core.authority.adopt-issued');
 // The company becomes a top node with no parent, then the person a user under it. The IDs do not change.
 let r = await adopt({ id: company.id, type: 'ORGANIZATION' });
 assert.equal(r.status, 201);
-assert.deepEqual(r.payload, { id: company.id, type: 'ORGANIZATION', basis: company.id, childCount: 0, status: 'ACTIVE', address });
+assert.deepEqual(r.payload, { id: company.id, type: 'ORGANIZATION', basis: company.id, childCount: 0, seats: { users: { used: 0 }, machines: { used: 0 } }, status: 'ACTIVE', address });
 r = await adopt({ id: person.id, type: 'USER', parentId: company.id });
 assert.equal(r.status, 201);
 assert.equal(r.payload.parentId, company.id);
 assert.deepEqual(await nodes.children(company.id), [{ childId: person.id, type: 'USER', address }], 'the parent lists the node it took');
+assert.equal((await nodes.describe(company.id))!.seats!.users.used, 1, 'an adopted user takes a seat');
 
 // The new nodes issue their own children from their own IDs.
 assert.equal((await nodes.issueChildId(company.id, { type: 'SITE' })).value, `${company.id}-3`);

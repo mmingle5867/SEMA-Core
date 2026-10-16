@@ -189,6 +189,11 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
         { method: 'POST', path: '/v1/core/topology/suspend', purpose: 'Suspend a node: its parent marks it, and its own Core locks itself and stays readable. Suspending a machine node locks that whole Core. Nodes below lock at their next check-in. Needs core.authority.suspend.' },
         { method: 'POST', path: '/v1/core/topology/resume', purpose: 'Resume a suspended node: clear its parent\'s mark and its own lock. Nodes below unlock at their next check-in. Needs core.authority.resume.' },
+        { method: 'POST', path: '/v1/core/topology/seat-limits', purpose: 'Set or clear an organization\'s allowed numbers of user and machine seats (users, machines; null clears). A division cannot allow more than its parent organization. Needs core.authority.seats.' },
+        { method: 'POST', path: '/v1/core/topology/recount-seats', purpose: 'Count an organization\'s seats again by walking down its lists; lowers a count only when everything answered.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/seat-change', purpose: 'Take seats on an organization node held here, or give them back (negative). Used between Cores.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/seat-limits', purpose: 'Set the allowed numbers of seats on an organization node held here. Used between Cores; needs core.authority.seats.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/seat-count', purpose: 'Set the seats in use on an organization node held here from a recount. Used between Cores.' },
         { method: 'POST', path: '/v1/core/topology/retire-away', purpose: 'Retire a user or machine that cannot be reached, for good: its parent keeps the entry marked retired, so it is refused if it comes back and its ID is never used again. Needs core.authority.retire.' },
         { method: 'POST', path: '/v1/core/topology/nodes/retire-child', purpose: 'Mark a child on a node\'s list as retired while it cannot be reached. Used between Cores during retire-away; needs core.authority.retire.' },
         { method: 'POST', path: '/v1/core/topology/nodes/shutdown', purpose: 'Lock a node held here, or clear its lock (null). Used between Cores; clearing needs core.authority.resume.' },
@@ -367,6 +372,23 @@ export class SemaCoreHost {
     const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
     return this.nodeChange(context, 'core.topology.child-retired-away', [nodeId, childId], (nodes) => nodes.retireChild(nodeId, { childId, ...(type ? { type } : {}), ...(address ? { address } : {}) }, retired), () => ({ reason: retired.reason }), 'core.authority.retire', true);
   }
+  private seatNumber(value: unknown, name: string) { if (value === undefined) return undefined; if (value === null) return null; if (!Number.isInteger(value)) throw new CoreHostValidationError(`${name} must be a whole number, or null to clear it`); return value as number; }
+  /** Takes or gives back seats on an organization node held here. Another Core asks this while adding, moving or removing a user or machine. */
+  nodeSeatChange(context: CoreHostRequestContext, input: { nodeId: string; users?: number; machines?: number }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), users = this.seatNumber(input.users, 'users') ?? undefined, machines = this.seatNumber(input.machines, 'machines') ?? undefined;
+    return this.nodeChange(context, 'core.topology.seats-changed', [nodeId], (nodes) => nodes.changeSeats(nodeId, { ...(users !== undefined ? { users } : {}), ...(machines !== undefined ? { machines } : {}) }), () => ({ ...(users !== undefined ? { users } : {}), ...(machines !== undefined ? { machines } : {}) }));
+  }
+  /** Sets the allowed numbers of seats on an organization node held here. Another Core asks this for seat-limits; it needs the same permission. */
+  nodeSeatLimits(context: CoreHostRequestContext, input: { nodeId: string; users?: number | null; machines?: number | null }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), users = this.seatNumber(input.users, 'users'), machines = this.seatNumber(input.machines, 'machines');
+    return this.nodeChange(context, 'core.topology.seat-limits-set', [nodeId], (nodes) => nodes.setSeatLimits(nodeId, { ...(users !== undefined ? { users } : {}), ...(machines !== undefined ? { machines } : {}) }), (seats) => ({ usersAllowed: seats.users.allowed ?? null, machinesAllowed: seats.machines.allowed ?? null }), 'core.authority.seats');
+  }
+  /** Sets the seats in use on an organization node held here from a recount. */
+  nodeSeatCount(context: CoreHostRequestContext, input: { nodeId: string; users: number; machines: number; complete: boolean }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    if (typeof input.complete !== 'boolean') throw new CoreHostValidationError('complete must be true or false');
+    return this.nodeChange(context, 'core.topology.seats-recounted', [nodeId], (nodes) => nodes.setSeatsUsed(nodeId, { users: input.users, machines: input.machines }, input.complete), (seats) => ({ usersUsed: seats.users.used, machinesUsed: seats.machines.used, complete: input.complete }));
+  }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
 
   // Operations across machines. This Core runs the conversation; the other Cores are reached at their stored addresses.
@@ -533,6 +555,16 @@ export class SemaCoreHost {
     return this.conversation(context, 'core.topology.node-resumed', [nodeId], (talk) => talk.resume({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}) }), (result) => ({ parentCleared: result.parentCleared, nodeCleared: result.nodeCleared, ...('notice' in result && result.notice ? { told: result.notice.told.length, unreachable: result.notice.unreachable.length, failed: result.notice.failed.length } : {}) }), 'core.authority.resume', true);
   }
 
+  /** Sets or clears an organization's allowed numbers of seats. The level above sets them: until signed orders exist, its own permission, held by nobody by default. */
+  topologySeatLimits(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; users?: number | null; machines?: number | null }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), users = this.seatNumber(input.users, 'users'), machines = this.seatNumber(input.machines, 'machines');
+    return this.conversation(context, 'core.topology.seat-limits-set', [nodeId], (talk) => talk.setSeatLimits({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(users !== undefined ? { users } : {}), ...(machines !== undefined ? { machines } : {}) }), (seats) => ({ usersAllowed: seats.users.allowed ?? null, machinesAllowed: seats.machines.allowed ?? null }), 'core.authority.seats');
+  }
+  /** Counts an organization's seats again. A count is lowered only when everything below answered. */
+  topologyRecountSeats(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId');
+    return this.conversation(context, 'core.topology.seats-recounted', [nodeId], (talk) => talk.recountSeats({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress') }), (result) => ({ users: result.counted.users, machines: result.counted.machines, complete: result.complete }));
+  }
   /** Retires a user or machine that cannot be reached, for good. Retiring takes more authority than suspending: its own permission, held by nobody by default. */
   topologyRetireAway(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId: string; parentAddress?: string; reason: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId'), parentId = this.text(input.parentId, 'parentId'), reason = this.text(input.reason, 'reason');

@@ -1,4 +1,4 @@
-import type { CheckInAnswer, ChildEntry, KeyLimits, NodeDescription, NodeType, Shutdown, Suspension } from './local-nodes.js';
+import type { CheckInAnswer, ChildEntry, KeyLimits, NodeDescription, NodeType, SeatView, Shutdown, Suspension } from './local-nodes.js';
 import type { AddressedPeers, NodePeer } from './conversations.js';
 
 export interface PeerCredentials { applicationKey: string; secret: string }
@@ -40,6 +40,9 @@ export class HttpNodePeer implements NodePeer {
   setShutdown(id: string, shutdown: Shutdown | null) { return this.call<NodeDescription>('POST', '/shutdown', { nodeId: id, shutdown }); }
   markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) { return this.call<{ marked: boolean }>('POST', '/mark-child', { nodeId: id, ...child, suspension }); }
   retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension) { return this.call<{ retired: true; childCount: number }>('POST', '/retire-child', { nodeId: id, ...child, retired }); }
+  changeSeats(id: string, change: { users?: number; machines?: number }) { return this.call<SeatView>('POST', '/seat-change', { nodeId: id, ...change }); }
+  setSeatLimits(id: string, limits: { users?: number | null; machines?: number | null }) { return this.call<SeatView>('POST', '/seat-limits', { nodeId: id, ...limits }); }
+  setSeatsUsed(id: string, counted: { users: number; machines: number }, complete: boolean) { return this.call<SeatView>('POST', '/seat-count', { nodeId: id, ...counted, complete }); }
 }
 
 /**
@@ -66,7 +69,7 @@ export function joiningPeer(baseUrl: string, joinCode: string, timeoutMs = 10_00
       if (response.ok && payload?.status === 'NOT_JOINED') return undefined;
       throw new Error('The Core at this address has joined a system; ask it through the node routes');
     },
-    setKeyLimits: notYet, setNextBasis: notYet, children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet, checkIn: notYet, setShutdown: notYet, markChild: notYet, retireChild: notYet,
+    setKeyLimits: notYet, setNextBasis: notYet, children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet, checkIn: notYet, setShutdown: notYet, markChild: notYet, retireChild: notYet, changeSeats: notYet, setSeatLimits: notYet, setSeatsUsed: notYet,
   };
 }
 
