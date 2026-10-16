@@ -23,7 +23,7 @@ async function reserve(tx: Db, input: { count: number; typeCode?: string; metada
       "issued" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN ${count} ELSE n."issued" + ${count} END,
       "nextBasis" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN NULL ELSE n."nextBasis" END,
       "switchAt" = CASE WHEN n."nextBasis" IS NOT NULL AND n."issued" + ${count} > n."switchAt" THEN NULL ELSE n."switchAt" END,
-      "updatedAt" = NOW()
+      "updatedAt" = (NOW() AT TIME ZONE 'UTC')
     FROM "sema_core_identity_state" AS s
     WHERE s."stateKey" = ${STATE_KEY} AND s."status" = 'ACTIVE' AND n."id" = s."installationId" AND n."status" = 'ACTIVE'
     RETURNING n."basis" AS "installationId", n."issued" - ${count} + 1 AS "localValue"
@@ -63,15 +63,15 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
   async grantTopLevelBlock(input: { block: number; start: bigint; end: bigint }) {
     // One row. A new block replaces the old one only when the old one has no values left.
     const written = await this.prisma.$executeRaw`
-      INSERT INTO "sema_top_level_counter" ("counterKey", "block", "issued", "blockEnd", "updatedAt") VALUES (${STATE_KEY}, ${input.block}, ${input.start - BigInt(1)}, ${input.end}, NOW())
-      ON CONFLICT ("counterKey") DO UPDATE SET "block" = EXCLUDED."block", "issued" = EXCLUDED."issued", "blockEnd" = EXCLUDED."blockEnd", "updatedAt" = NOW()
+      INSERT INTO "sema_top_level_counter" ("counterKey", "block", "issued", "blockEnd", "updatedAt") VALUES (${STATE_KEY}, ${input.block}, ${input.start - BigInt(1)}, ${input.end}, (NOW() AT TIME ZONE 'UTC'))
+      ON CONFLICT ("counterKey") DO UPDATE SET "block" = EXCLUDED."block", "issued" = EXCLUDED."issued", "blockEnd" = EXCLUDED."blockEnd", "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "sema_top_level_counter"."issued" + 1 >= "sema_top_level_counter"."blockEnd"`;
     if (written !== 1) throw new Error('This Core already holds a block with values left');
   }
   async issueTopLevelValue() {
     // The row is locked while it moves, and it stops at the end of the block.
     const rows = await this.prisma.$queryRaw<Array<{ issued: bigint }>>`
-      UPDATE "sema_top_level_counter" SET "issued" = "issued" + 1, "updatedAt" = NOW()
+      UPDATE "sema_top_level_counter" SET "issued" = "issued" + 1, "updatedAt" = (NOW() AT TIME ZONE 'UTC')
       WHERE "counterKey" = ${STATE_KEY} AND "issued" + 1 < "blockEnd" RETURNING "issued"`;
     return rows[0] ? BigInt(rows[0].issued) : undefined;
   }
@@ -92,12 +92,12 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     await this.prisma.$transaction(async (tx) => {
       const created = await tx.$executeRaw`
         INSERT INTO "sema_core_identity_state" ("stateKey", "installationId", "nextLocalId", "status", "updatedAt")
-        VALUES (${STATE_KEY}, ${input.id}, 1, 'ACTIVE', NOW())
+        VALUES (${STATE_KEY}, ${input.id}, 1, 'ACTIVE', (NOW() AT TIME ZONE 'UTC'))
         ON CONFLICT ("stateKey") DO NOTHING`;
       if (created !== 1) throw new Error('This Core has already joined a system');
       const recorded = await tx.$executeRaw`
         INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "createdAt", "updatedAt")
-        VALUES (${input.id}, 'MACHINE', ${input.parentId}, ${input.parentAddress ?? null}, ${input.id}, 0, true, 'ACTIVE', NOW(), NOW())
+        VALUES (${input.id}, 'MACHINE', ${input.parentId}, ${input.parentAddress ?? null}, ${input.id}, 0, true, 'ACTIVE', (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
         ON CONFLICT ("id") DO NOTHING`;
       if (recorded !== 1) throw new Error(`Node already exists: ${input.id}`);
     });
@@ -109,7 +109,7 @@ export class PrismaSemaCoreHostStore implements SemaCoreStore, CoreHostStore {
     // The machine node is created on first start from the existing counter, so IDs already issued are untouched. Its type is MACHINE.
     await this.prisma.$executeRaw`
       INSERT INTO "sema_local_nodes" ("id", "type", "parentId", "parentAddress", "basis", "issued", "childListComplete", "status", "createdAt", "updatedAt")
-      VALUES (${installationId}, 'MACHINE', NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, true, 'ACTIVE', NOW(), NOW())
+      VALUES (${installationId}, 'MACHINE', NULL, NULL, ${installationId}, ${state.nextLocalId - BigInt(1)}, true, 'ACTIVE', (NOW() AT TIME ZONE 'UTC'), (NOW() AT TIME ZONE 'UTC'))
       ON CONFLICT ("id") DO NOTHING`;
     const node = await this.machineNode();
     return { installationId: state.installationId, nextLocalId: node.issued + BigInt(1), status: state.status as 'ACTIVE' | 'SUSPENDED' };
