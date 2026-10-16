@@ -200,7 +200,7 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/key-limit-check', purpose: 'Run that check now and return its report.' },
         { method: 'POST', path: '/v1/core/topology/adopt-issued', purpose: 'Make an ID this Core already issued, and took into use as the same type, into a node, keeping the ID, so nothing pointing at it is renumbered. Needs the permission core.authority.adopt-issued.' },
         { method: 'POST', path: '/v1/core/topology/rehome', purpose: 'Move a node and everything below it under a new parent.' },
-        { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node; its children follow its pointer to the nearest live ancestor.' },
+        { method: 'POST', path: '/v1/core/topology/remove', purpose: 'Retire a node for good; its children follow its pointer to the nearest live ancestor. Needs core.authority.retire.' },
         { method: 'POST', path: '/v1/core/topology/roll-up', purpose: 'Shorten a node\'s basis using a reachable ancestor.' },
         { method: 'POST', path: '/v1/core/topology/repair-parent', purpose: 'Point a node whose parent was retired at its nearest live ancestor, adding it to that ancestor\'s list.' },
         { method: 'POST', path: '/v1/core/topology/check-children', purpose: 'Check a node\'s list against its children\'s own pointers; drop an entry only when the child names a different parent or says it is retired.' },
@@ -490,10 +490,11 @@ export class SemaCoreHost {
     const nodeId = this.text(input.nodeId, 'nodeId'), newParentId = this.text(input.newParentId, 'newParentId');
     return this.conversation(context, 'core.topology.node-rehomed', [nodeId, newParentId], (talk) => talk.rehome({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), newParentId, newParentAddress: this.address(input.newParentAddress, 'newParentAddress'), administratorOverride: input.administratorOverride === true }), (result) => ({ changed: result.changed, administratorOverride: input.administratorOverride === true, oldParentListStale: result.changed ? result.oldParentListStale : false }));
   }
+  /** Retires a node for good. Retiring takes more authority than suspending, so it has its own permission, held by nobody by default. */
   topologyRemove(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; childrenParentId?: string; childrenParentAddress?: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId');
     const childrenParentId = input.childrenParentId ? this.text(input.childrenParentId, 'childrenParentId') : undefined;
-    return this.conversation(context, 'core.topology.node-removed', [nodeId, ...(childrenParentId ? [childrenParentId] : [])], (talk) => talk.remove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), childrenParentId, childrenParentAddress: childrenParentId ? this.address(input.childrenParentAddress, 'childrenParentAddress') : undefined }), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount }));
+    return this.conversation(context, 'core.topology.node-removed', [nodeId, ...(childrenParentId ? [childrenParentId] : [])], (talk) => talk.remove({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), childrenParentId, childrenParentAddress: childrenParentId ? this.address(input.childrenParentAddress, 'childrenParentAddress') : undefined }), (result) => ({ parentId: result.parentId ?? null, childCount: result.childCount }), 'core.authority.retire');
   }
   /** Shortens a node's basis using an ancestor inside its own organization: the highest reachable one, or the named one. */
   topologyRollUp(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; issuerId?: string }) {

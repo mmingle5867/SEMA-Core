@@ -15,7 +15,7 @@ stored beside each parent pointer.
 
 Without the peer credential a Core still works alone; the conversation routes answer that they are not configured.
 
-## Routes (all need `core.topology.write`, except the reads)
+## Routes (each needs `core.topology.write` unless its row names another permission; reads need `core.topology.read`)
 
 | Route | What it does |
 | --- | --- |
@@ -30,7 +30,7 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/adopt-issued` `{id, type, parentId?, parentAddress?, nodeAddress?}` | Makes an ID this Core already issued into a node, keeping the ID. Needs `core.authority.adopt-issued`. See below. |
 | `POST /v1/core/topology/key-limits` `{nodeId, nodeAddress?, maxSegments?, maxSegmentLength?, maxLastSegmentLength?}` | Sets, changes or clears an organization's optional key limits. See below. |
 | `POST /v1/core/topology/rehome` `{nodeId, nodeAddress?, newParentId, newParentAddress?, administratorOverride?}` | Move a node and its subtree. Only "under itself" is refused. |
-| `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire; its children go on its parent's list, and each follows the pointer later. |
+| `POST /v1/core/topology/remove` `{nodeId, nodeAddress?, childrenParentId?}` | Retire for good; its children go on its parent's list, and each follows the pointer later. Needs `core.authority.retire`. |
 | `POST /v1/core/topology/roll-up` `{nodeId, nodeAddress?, issuerId?}` | Shorter basis from a reachable ancestor inside the node's own organization (its nearest organization ancestor or a node between), by default the highest. Going outside the organization will need a segment limit the node is over; no limits exist yet, so an organization node cannot roll up. |
 | `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor, adding it to that ancestor's list first. |
 | `POST /v1/core/topology/check-children` `{nodeId, nodeAddress?}` | Check a node's list against its children's own pointers. See below. |
@@ -225,4 +225,4 @@ The first piece of shutting down a Core (design doc section 8): suspend, which c
 - **Who may do it, until signed orders exist.** `core.authority.suspend`: meant for the Console's application record, so any administrator can stop a node. `core.authority.resume`: held by nobody, granted by hand when needed and removed afterwards. Stopping is easy; restarting is harder. Between Cores, locking or marking needs `core.topology.write`; clearing needs `core.authority.resume` on the Core that clears.
 - Every suspend, resume, lock and unlock is audited.
 - **Retiring for good.** A node that can be reached is retired with `remove`. A user or machine that cannot be reached is retired with `retire-away`: its parent keeps the entry, marked retired, as the record that refuses it. The entry no longer counts as a child, the tree shows it as retired, and the notice and check-children pass it by. If the machine ever comes back, its check-in is answered with that and it retires its own record (`RETIRED_WHILE_AWAY`, audited); its ID is never used again. Anything other than a user or machine is refused, because its own list of children is on its machine. It needs `core.authority.retire`, held by nobody by default: retiring takes more authority than suspending.
-- Not built yet: refusing a node in conversations by its parent's mark when its own Core will not lock itself (needs signed requests); `remove` still needs only `core.topology.write`.
+- Not built yet: refusing a node in conversations by its parent's mark when its own Core will not lock itself (needs signed requests); the single-node routes between Cores (`/v1/core/topology/nodes/...`) still need only `core.topology.write`; they are for trusted Cores and are not passed through by the Console.
