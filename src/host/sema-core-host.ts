@@ -189,6 +189,8 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
         { method: 'POST', path: '/v1/core/topology/suspend', purpose: 'Suspend a node: its parent marks it, and its own Core locks itself and stays readable. Suspending a machine node locks that whole Core. Nodes below lock at their next check-in. Needs core.authority.suspend.' },
         { method: 'POST', path: '/v1/core/topology/resume', purpose: 'Resume a suspended node: clear its parent\'s mark and its own lock. Nodes below unlock at their next check-in. Needs core.authority.resume.' },
+        { method: 'POST', path: '/v1/core/topology/retire-away', purpose: 'Retire a user or machine that cannot be reached, for good: its parent keeps the entry marked retired, so it is refused if it comes back and its ID is never used again. Needs core.authority.retire.' },
+        { method: 'POST', path: '/v1/core/topology/nodes/retire-child', purpose: 'Mark a child on a node\'s list as retired while it cannot be reached. Used between Cores during retire-away; needs core.authority.retire.' },
         { method: 'POST', path: '/v1/core/topology/nodes/shutdown', purpose: 'Lock a node held here, or clear its lock (null). Used between Cores; clearing needs core.authority.resume.' },
         { method: 'POST', path: '/v1/core/topology/nodes/mark-child', purpose: 'Mark a child on a node\'s list as suspended, or clear the mark (null). Used between Cores; clearing needs core.authority.resume.' },
         { method: 'POST', path: '/v1/core/topology/nodes/check-in', purpose: 'A child checks in with a node held here, its parent: the time is stamped on its entry, which is added if missing. A retired parent answers with its own pointer. Used between Cores.' },
@@ -357,6 +359,14 @@ export class SemaCoreHost {
     const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
     return this.nodeChange(context, suspension ? 'core.topology.child-marked-suspended' : 'core.topology.child-mark-cleared', [nodeId, childId], (nodes) => nodes.markChild(nodeId, { childId, ...(type ? { type } : {}), ...(address ? { address } : {}) }, suspension), (result) => ({ marked: result.marked }), suspension ? 'core.topology.write' : 'core.authority.resume', true);
   }
+  /** Marks a child on a node's list as retired while it cannot be reached. Another Core asks this during retire-away; it needs the same permission. */
+  nodeRetireChild(context: CoreHostRequestContext, input: { nodeId: string; childId: string; type?: NodeType; address?: string; retired?: unknown }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), childId = this.text(input.childId, 'childId'), retired = this.suspensionInput(input.retired);
+    if (!retired) throw new CoreHostValidationError('retired must be { reason, by?, at }');
+    const type = input.type === undefined || input.type === null ? undefined : this.nodeType(input.type);
+    const address = input.address === undefined || input.address === null ? undefined : this.text(input.address, 'address');
+    return this.nodeChange(context, 'core.topology.child-retired-away', [nodeId, childId], (nodes) => nodes.retireChild(nodeId, { childId, ...(type ? { type } : {}), ...(address ? { address } : {}) }, retired), () => ({ reason: retired.reason }), 'core.authority.retire', true);
+  }
   nodeRetire(context: CoreHostRequestContext, input: { nodeId: string }) { const nodeId = this.text(input.nodeId, 'nodeId'); return this.nodeChange(context, 'core.topology.node-retired', [nodeId], (nodes) => nodes.retire(nodeId), (result) => ({ parentId: result.parentId ?? null, childCount: result.children.length })); }
 
   // Operations across machines. This Core runs the conversation; the other Cores are reached at their stored addresses.
@@ -522,6 +532,12 @@ export class SemaCoreHost {
     return this.conversation(context, 'core.topology.node-resumed', [nodeId], (talk) => talk.resume({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), ...(parentId ? { parentId, parentAddress: this.address(input.parentAddress, 'parentAddress') } : {}) }), (result) => ({ parentCleared: result.parentCleared, nodeCleared: result.nodeCleared, ...('notice' in result && result.notice ? { told: result.notice.told.length, unreachable: result.notice.unreachable.length, failed: result.notice.failed.length } : {}) }), 'core.authority.resume', true);
   }
 
+  /** Retires a user or machine that cannot be reached, for good. Retiring takes more authority than suspending: its own permission, held by nobody by default. */
+  topologyRetireAway(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId: string; parentAddress?: string; reason: string }) {
+    const nodeId = this.text(input.nodeId, 'nodeId'), parentId = this.text(input.parentId, 'parentId'), reason = this.text(input.reason, 'reason');
+    return this.conversation(context, 'core.topology.node-retired-away', [nodeId, parentId], (talk) => talk.retireAway({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), parentId, parentAddress: this.address(input.parentAddress, 'parentAddress'), reason, ...(context.actorId ? { by: context.actorId } : {}) }), () => ({ reason }), 'core.authority.retire');
+  }
+
   private machineNodeId: string | undefined;
   /** What this Core's own machine node says about being shut down, or undefined. Read each time: never cached. */
   private async lockedBy(): Promise<Shutdown | undefined> {
@@ -547,6 +563,7 @@ export class SemaCoreHost {
       try {
         const result = await talk.checkIn({ nodeId: node.id, nodeAddress: address });
         if (result.state === 'RETIRED') continue;
+        if (result.state === 'RETIRED_WHILE_AWAY') await this.core.recordAudit({ action: 'core.topology.node-retired-by-parent', actorId, subjectIds: [node.id, ...(result.parentId ? [result.parentId] : [])], evidence: { reason: result.retired.reason } });
         if ('locked' in result && result.locked) await this.core.recordAudit({ action: 'core.topology.node-locked', actorId, subjectIds: [node.id, result.shutdown.nodeId], evidence: { reason: result.shutdown.reason, via: 'PARENT' } });
         if ('unlocked' in result && result.unlocked) await this.core.recordAudit({ action: 'core.topology.node-unlocked', actorId, subjectIds: [node.id], evidence: { via: 'PARENT' } });
         if (result.state === 'PARENT_RETIRED' && result.newParentId) await this.core.recordAudit({ action: 'core.topology.parent-repaired', actorId, subjectIds: [node.id, result.newParentId], evidence: { retiredParentId: result.parentId, by: 'check-in' } });

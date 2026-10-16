@@ -39,6 +39,7 @@ export class HttpNodePeer implements NodePeer {
   checkIn(id: string, child: ChildEntry) { return this.call<CheckInAnswer>('POST', '/check-in', { nodeId: id, childId: child.childId, type: child.type, ...(child.address ? { address: child.address } : {}) }); }
   setShutdown(id: string, shutdown: Shutdown | null) { return this.call<NodeDescription>('POST', '/shutdown', { nodeId: id, shutdown }); }
   markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) { return this.call<{ marked: boolean }>('POST', '/mark-child', { nodeId: id, ...child, suspension }); }
+  retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension) { return this.call<{ retired: true; childCount: number }>('POST', '/retire-child', { nodeId: id, ...child, retired }); }
 }
 
 /**
@@ -65,7 +66,7 @@ export function joiningPeer(baseUrl: string, joinCode: string, timeoutMs = 10_00
       if (response.ok && payload?.status === 'NOT_JOINED') return undefined;
       throw new Error('The Core at this address has joined a system; ask it through the node routes');
     },
-    setKeyLimits: notYet, setNextBasis: notYet, children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet, checkIn: notYet, setShutdown: notYet, markChild: notYet,
+    setKeyLimits: notYet, setNextBasis: notYet, children: notYet, issueChildId: notYet, issueBasis: notYet, setParent: notYet, setBasis: notYet, addChildren: notYet, removeChild: notYet, setChildListComplete: notYet, retire: notYet, acceptRetired: notYet, checkIn: notYet, setShutdown: notYet, markChild: notYet, retireChild: notYet,
   };
 }
 

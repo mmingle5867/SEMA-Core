@@ -84,7 +84,7 @@ export interface CheckInRun {
     nodeId: string;
     parentId?: string;
     /** CHECKED_IN: the parent stamped the time. TOP: no parent to check in with. UNREACHABLE: the parent's Core did not answer. PARENT_RETIRED: the parent is retired; the node followed the chain (newParentId when it moved). FAILED: the parent refused or the check-in broke (see reason). */
-    state: 'CHECKED_IN' | 'TOP' | 'UNREACHABLE' | 'PARENT_RETIRED' | 'FAILED';
+    state: 'CHECKED_IN' | 'TOP' | 'UNREACHABLE' | 'PARENT_RETIRED' | 'RETIRED_WHILE_AWAY' | 'FAILED';
     lastSeenAt?: string;
     /** The parent's list did not have this node, and now does. */
     addedToList?: true;

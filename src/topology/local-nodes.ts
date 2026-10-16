@@ -54,6 +54,11 @@ export interface ChildEntry {
   lastSeenAt?: string;
   /** Present when the child has been suspended. */
   suspension?: Suspension;
+  /**
+   * Present when the child was retired while its machine could not be reached. The entry stays as the record that
+   * refuses it if it comes back; it is no longer counted as a child.
+   */
+  retired?: Suspension;
 }
 
 /** The mark a parent keeps on the entry of a child that has been suspended. Every other Core learns it there. */
@@ -82,7 +87,9 @@ export interface Shutdown extends Suspension {
  */
 export type CheckInAnswer =
   | { status: 'ACTIVE'; lastSeenAt: string; added: boolean; shutdown?: Omit<Shutdown, 'via'> }
-  | { status: 'RETIRED'; parentId?: string; parentAddress?: string };
+  | { status: 'RETIRED'; parentId?: string; parentAddress?: string }
+  /** The child itself was retired while it was away: it must retire its own record and do nothing more. */
+  | { status: 'CHILD_RETIRED'; retired: Suspension };
 
 /**
  * Optional limits an organization sets on the IDs issued inside it: a preference, never needed for uniqueness. They
@@ -155,7 +162,7 @@ export interface LocalNodeStore {
    */
   mutate<T>(id: string, change: (node: LocalNode) => { node: LocalNode; result: T; addChildren?: ChildEntry[] }): Promise<T>;
   children(id: string): Promise<ChildEntry[]>;
-  /** How many children each node held here has, by node ID. */
+  /** How many children each node held here has, by node ID. Children retired while away are not counted. */
   countChildren(): Promise<Map<string, number>>;
   /** Adds children, or updates entries already there. Only an active node may gain children. */
   addChildren(id: string, entries: ChildEntry[]): Promise<void>;
@@ -165,7 +172,9 @@ export interface LocalNodeStore {
    * Stamps the time a child checked in on its entry. A child missing from the list is added: its own pointer says this
    * is its parent, and the list may hold too many entries, never too few. Only an active node may gain children.
    */
-  checkIn(id: string, child: ChildEntry, at: Date): Promise<{ added: boolean; suspension?: Suspension }>;
+  checkIn(id: string, child: ChildEntry, at: Date): Promise<{ added: boolean; suspension?: Suspension; retired?: Suspension }>;
+  /** Marks a child on the list as retired, adding the entry if it is missing and its type is known. */
+  retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension): Promise<void>;
   /**
    * Sets or clears the suspension mark on a child's entry. Setting it on a child missing from the list adds the entry,
    * when its type is known; clearing it never adds one. Says whether the entry is there.
@@ -192,7 +201,7 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
     return result;
   }
   async children(id: string) { return [...(this.lists.get(id)?.values() ?? [])].map((entry) => ({ ...entry })); }
-  async countChildren() { return new Map([...this.lists].map(([id, list]) => [id, list.size])); }
+  async countChildren() { return new Map([...this.lists].map(([id, list]) => [id, [...list.values()].filter((entry) => !entry.retired).length])); }
   async addChildren(id: string, entries: ChildEntry[]) {
     const node = this.nodes.get(id);
     if (!node) throw new Error(`Node does not exist on this Core: ${id}`);
@@ -209,7 +218,13 @@ export class InMemoryLocalNodeStore implements LocalNodeStore {
     if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${id}`);
     const list = this.lists.get(id)!, current = list.get(child.childId);
     list.set(child.childId, { ...(current ?? child), lastSeenAt: at.toISOString() });
-    return { added: !current, ...(current?.suspension ? { suspension: { ...current.suspension } } : {}) };
+    return { added: !current, ...(current?.suspension ? { suspension: { ...current.suspension } } : {}), ...(current?.retired ? { retired: { ...current.retired } } : {}) };
+  }
+  async retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension) {
+    if (!this.nodes.has(id)) throw new Error(`Node does not exist on this Core: ${id}`);
+    const list = this.lists.get(id)!, current = list.get(child.childId);
+    if (!current && !child.type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
+    list.set(child.childId, { ...(current ?? { childId: child.childId, type: child.type!, ...(child.address ? { address: child.address } : {}) }), retired: { ...retired } });
   }
   async markChild(id: string, child: { childId: string; type?: NodeType; address?: string }, suspension: Suspension | null) {
     if (!this.nodes.has(id)) throw new Error(`Node does not exist on this Core: ${id}`);
@@ -312,7 +327,7 @@ export class LocalNodes {
 
   async describe(id: string) {
     const node = await this.store.get(id);
-    return node ? this.describeNode(node, (await this.store.children(id)).length) : undefined;
+    return node ? this.describeNode(node, (await this.count(id))) : undefined;
   }
 
   /** The node's direct children, as it believes them to be. */
@@ -334,7 +349,7 @@ export class LocalNodes {
       const childId = `${next.basis}-${encodeBase56(next.first)}`;
       return { node: next.node, result: childId, addChildren: [entry({ childId, type: child.type, address: child.address })] };
     });
-    return { value, childCount: (await this.store.children(id)).length };
+    return { value, childCount: (await this.count(id)) };
   }
 
   /** Issues a fresh value that another node will adopt as its basis. It is not a child, so the list is unchanged. */
@@ -354,7 +369,7 @@ export class LocalNodes {
       const next: LocalNode = { ...rest, parentId, ...(parentAddress ? { parentAddress } : {}) };
       return { node: next, result: next };
     });
-    return this.describeNode(moved, (await this.store.children(id)).length);
+    return this.describeNode(moved, (await this.count(id)));
   }
 
   /** Adopts a shorter basis issued by a reachable ancestor. Only the basis and its counter change. */
@@ -383,7 +398,7 @@ export class LocalNodes {
       const next: LocalNode = node.nextBasis ? node : { ...node, nextBasis: input.basis, switchAt };
       return { node: next, result: next };
     });
-    return this.describeNode(changed, (await this.store.children(id)).length);
+    return this.describeNode(changed, (await this.count(id)));
   }
 
   /** The counters of the nodes held here, for the check that fetches a ready basis before a limit is reached. */
@@ -404,7 +419,7 @@ export class LocalNodes {
     this.requireUsable(parent);
     for (const child of entries) requireMayHold(parent, child);
     await this.store.addChildren(id, entries);
-    return { childCount: (await this.store.children(id)).length };
+    return { childCount: (await this.count(id)) };
   }
 
   /**
@@ -420,7 +435,8 @@ export class LocalNodes {
     if (parent.status !== 'ACTIVE') return { status: 'RETIRED', ...(parent.parentId ? { parentId: parent.parentId } : {}), ...(parent.parentAddress ? { parentAddress: parent.parentAddress } : {}) };
     requireMayHold(parent, checked);
     const at = new Date();
-    const { added, suspension } = await this.store.checkIn(id, checked, at);
+    const { added, suspension, retired } = await this.store.checkIn(id, checked, at);
+    if (retired) return { status: 'CHILD_RETIRED', retired };
     const above = parent.shutdown;
     const shutdown = suspension ? { nodeId: checked.childId, ...suspension } : above ? { nodeId: above.nodeId, reason: above.reason, ...(above.by ? { by: above.by } : {}), at: above.at } : undefined;
     return { status: 'ACTIVE', lastSeenAt: at.toISOString(), added, ...(shutdown ? { shutdown } : {}) };
@@ -443,7 +459,7 @@ export class LocalNodes {
       const next: LocalNode = shutdown ? { ...rest, shutdown: { nodeId: shutdown.nodeId, reason: shutdown.reason.trim(), ...(shutdown.by ? { by: shutdown.by } : {}), at: new Date(shutdown.at).toISOString(), via: shutdown.via } } : rest;
       return { node: next, result: next };
     });
-    return this.describeNode(changed, (await this.store.children(id)).length);
+    return this.describeNode(changed, (await this.count(id)));
   }
 
   /** Marks a child on this node's list as suspended, or clears the mark with null. This mark is what every other Core sees. */
@@ -459,10 +475,29 @@ export class LocalNodes {
     return { marked };
   }
 
+  /**
+   * Retires a child that cannot be reached: its entry is kept, marked retired, so if it ever comes back its check-in is
+   * answered with that and it retires its own record. Its ID is never used again. Only a user or a machine: anything
+   * else has a list of children on its own machine, which cannot be moved while it is away.
+   */
+  async retireChild(id: string, child: { childId: string; type?: NodeType; address?: string }, retired: Suspension) {
+    if (!validId(child.childId)) throw new Error('A child ID must be hyphen-separated non-empty segments');
+    if (typeof retired.reason !== 'string' || !retired.reason.trim()) throw new Error('Retiring needs a reason');
+    if (Number.isNaN(Date.parse(retired.at))) throw new Error('at must be a time');
+    const parent = await this.store.get(id);
+    if (!parent) throw new Error(`Node does not exist on this Core: ${id}`);
+    const listed = (await this.store.children(id)).find((entry) => entry.childId === child.childId);
+    const type = listed?.type ?? child.type;
+    if (!type) throw new Error(`${child.childId} is not on the list of ${id}, and its type is not known`);
+    if (type !== 'USER' && type !== 'MACHINE') throw new Error(`Only a user or a machine can be retired while it cannot be reached. ${child.childId} is ${a(type)}: its own list of children is on its machine`);
+    await this.store.retireChild(id, { childId: child.childId, type, ...(child.address ? { address: child.address } : {}) }, { reason: retired.reason.trim(), ...(retired.by ? { by: retired.by } : {}), at: new Date(retired.at).toISOString() });
+    return { retired: true as const, childCount: await this.count(id) };
+  }
+
   /** Takes one child off a node's list. */
   async removeChild(id: string, childId: string) {
     const removed = await this.store.removeChild(id, childId);
-    return { removed, childCount: (await this.store.children(id)).length };
+    return { removed, childCount: (await this.count(id)) };
   }
 
   /** Says whether the node's list of children is known to be complete. */
@@ -481,7 +516,7 @@ export class LocalNodes {
       const next: LocalNode = hasLimits(limits) ? { ...rest, keyLimits: limits } : rest;
       return { node: next, result: next };
     });
-    return this.describeNode(changed, (await this.store.children(id)).length);
+    return this.describeNode(changed, (await this.count(id)));
   }
 
   /**
@@ -496,6 +531,8 @@ export class LocalNodes {
     return { ...(node.parentId ? { parentId: node.parentId } : {}), ...(node.parentAddress ? { parentAddress: node.parentAddress } : {}), children: await this.store.children(id), childListComplete: node.childListComplete };
   }
 
+  /** The node's children, not counting entries kept only as the record of a child retired while away. */
+  private async count(id: string) { return (await this.store.children(id)).filter((entry) => !entry.retired).length; }
   private requireActive(node: LocalNode) { if (node.status !== 'ACTIVE') throw new Error(`Node is retired: ${node.id}`); }
   /** Active and not shut down: what every change to a node, and all work from it, needs. */
   private requireUsable(node: LocalNode) {
