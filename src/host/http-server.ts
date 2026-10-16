@@ -45,7 +45,8 @@ function parseRequestUrl(raw: string | undefined) {
   }
 }
 
-async function readJson(request: IncomingMessage): Promise<unknown> {
+/** The request body, read once, as the exact bytes sent: a signature covers those bytes. */
+async function readBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let byteCount = 0;
   for await (const chunk of request) {
@@ -54,7 +55,11 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
     if (byteCount > MAX_BODY_BYTES) throw new HttpRequestError(413, 'PAYLOAD_TOO_LARGE', 'Request body exceeds 256 KiB');
     chunks.push(buffer);
   }
-  const source = Buffer.concat(chunks).toString('utf8').trim();
+  return Buffer.concat(chunks);
+}
+
+function parseJson(body: Buffer): unknown {
+  const source = body.toString('utf8').trim();
   if (!source) return {};
   try {
     return JSON.parse(source);
@@ -81,84 +86,97 @@ function classify(error: unknown): { status: number; code: string; message: stri
 async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap<string, string>, request: IncomingMessage, response: ServerResponse) {
   try {
     const url = parseRequestUrl(request.url);
-    const actorHeader = request.headers['x-sema-application-key'] ?? request.headers['x-sema-actor-id'];
-    const actorId = typeof actorHeader === 'string' && actorHeader.trim() ? actorHeader.trim() : null;
-    // When application clients are registered, every request must prove which application is calling.
-    // The secret authenticates the application; it is never recorded as a person.
-    if (applicationClients.size > 0) {
-      const secretHeader = request.headers['x-sema-application-secret'];
-      const secret = typeof secretHeader === 'string' ? secretHeader : '';
-      if (!actorId || !secretMatches(applicationClients.get(actorId), secret)) throw new HttpRequestError(401, 'UNAUTHENTICATED', 'A valid SEMA application credential is required.');
+    const body = request.method === 'GET' || request.method === 'HEAD' ? Buffer.alloc(0) : await readBody(request);
+    const json = async () => parseJson(body);
+    let actorId: string | null;
+    if (request.headers['signature-input'] !== undefined) {
+      // A signed request (RFC 9421): the program is the one that registered the key that signed it.
+      try { actorId = await host.authenticateSigned({ method: request.method ?? 'GET', authority: request.headers.host ?? '', path: url.pathname, search: url.search, headers: request.headers, body }); }
+      catch (error) { throw new HttpRequestError(401, 'UNAUTHENTICATED', `The signed request was refused: ${error instanceof Error ? error.message : 'invalid signature'}`); }
+    } else {
+      const actorHeader = request.headers['x-sema-application-key'] ?? request.headers['x-sema-actor-id'];
+      actorId = typeof actorHeader === 'string' && actorHeader.trim() ? actorHeader.trim() : null;
+      // When application clients are registered, every request must prove which application is calling, by signing it
+      // or, until every program signs, with its key and secret. The secret is never recorded as a person.
+      if (applicationClients.size > 0) {
+        const secretHeader = request.headers['x-sema-application-secret'];
+        const secret = typeof secretHeader === 'string' ? secretHeader : '';
+        if (!actorId || !secretMatches(applicationClients.get(actorId), secret)) throw new HttpRequestError(401, 'UNAUTHENTICATED', 'A valid SEMA application credential is required.');
+      }
     }
     const context = { actorId };
+    if (request.method === 'GET' && url.pathname === '/v1/core/keys') return write(response, 200, await host.machineKey(context));
+    if (request.method === 'POST' && url.pathname === '/v1/core/keys/clients') return write(response, 201, await host.registerClientKey(context, await json() as Parameters<typeof host.registerClientKey>[1]));
+    if (request.method === 'GET' && url.pathname === '/v1/core/keys/clients') return write(response, 200, await host.listClientKeys(context));
+    if (request.method === 'POST' && url.pathname === '/v1/core/keys/clients/revoke') return write(response, 200, await host.revokeClientKey(context, await json() as Parameters<typeof host.revokeClientKey>[1]));
     if (request.method === 'GET' && url.pathname === '/v1/core/health') return write(response, 200, await host.health(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/settings') return write(response, 200, await host.getSettings(context));
-    if (request.method === 'PUT' && url.pathname === '/v1/core/settings') return write(response, 200, await host.updateSettings(context, await readJson(request) as Partial<CoreHostSettings>));
+    if (request.method === 'PUT' && url.pathname === '/v1/core/settings') return write(response, 200, await host.updateSettings(context, await json() as Partial<CoreHostSettings>));
     if (request.method === 'GET' && url.pathname === '/v1/core/statistics') return write(response, 200, await host.statistics(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/capabilities') return write(response, 200, await host.capabilities(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/documentation') return write(response, 200, await host.documentation(context));
-    if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/reservations') return write(response, 201, await host.reserveIdentifiers(context, await readJson(request) as { count: number; typeCode?: string; metadata?: import('../core/types.js').JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume') return write(response, 200, await host.consumeReservedIdentifier(context, await readJson(request) as { reservationId: string; id: string; metadata?: import('../core/types.js').JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands') return write(response, 201, await host.createCommand(context, await readJson(request) as { commandType: string; actorId?: string | null; workspaceId?: string | null; subjectIds?: string[]; context?: JsonObject; payload?: JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands/status') return write(response, 200, await host.updateCommandStatus(context, await readJson(request) as { commandId: string; status: CoreLifecycleStatus }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/reservations') return write(response, 201, await host.reserveIdentifiers(context, await json() as { count: number; typeCode?: string; metadata?: import('../core/types.js').JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/identifiers/consume') return write(response, 200, await host.consumeReservedIdentifier(context, await json() as { reservationId: string; id: string; metadata?: import('../core/types.js').JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands') return write(response, 201, await host.createCommand(context, await json() as { commandType: string; actorId?: string | null; workspaceId?: string | null; subjectIds?: string[]; context?: JsonObject; payload?: JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/commands/status') return write(response, 200, await host.updateCommandStatus(context, await json() as { commandId: string; status: CoreLifecycleStatus }));
     if (request.method === 'GET' && url.pathname === '/v1/core/runtime/commands') { const commandId = url.searchParams.get('id'); if (commandId) return write(response, 200, await host.getCommand(context, commandId)); const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined; return write(response, 200, await host.listCommands(context, { actorId: url.searchParams.has('actorId') ? url.searchParams.get('actorId') : undefined, commandTypePrefix: url.searchParams.get('commandTypePrefix') ?? undefined, status: (url.searchParams.get('status') ?? undefined) as CoreCommand['status'] | undefined, limit })); }
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions') return write(response, 201, await host.startExecution(context, await readJson(request) as { commandId: string; providerId?: string | null; context?: JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete') return write(response, 200, await host.completeExecution(context, await readJson(request) as { execution: CoreExecution; status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>; resultType?: string; subjectIds?: string[]; result?: JsonObject; error?: JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/events') return write(response, 201, await host.recordEvent(context, await readJson(request) as { eventType: string; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; data?: JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/audits') return write(response, 201, await host.recordAudit(context, await readJson(request) as { action: string; actorId?: string | null; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; evidence?: JsonObject }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities') return write(response, 200, await host.registerCapability(context, await readJson(request) as Omit<CoreCapability, 'id' | 'status'> & { status?: CoreCapability['status'] }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions') return write(response, 201, await host.startExecution(context, await json() as { commandId: string; providerId?: string | null; context?: JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/executions/complete') return write(response, 200, await host.completeExecution(context, await json() as { execution: CoreExecution; status: Extract<CoreLifecycleStatus, 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'WAITING'>; resultType?: string; subjectIds?: string[]; result?: JsonObject; error?: JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/events') return write(response, 201, await host.recordEvent(context, await json() as { eventType: string; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; data?: JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/audits') return write(response, 201, await host.recordAudit(context, await json() as { action: string; actorId?: string | null; commandId?: string | null; executionId?: string | null; subjectIds?: string[]; evidence?: JsonObject }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities') return write(response, 200, await host.registerCapability(context, await json() as Omit<CoreCapability, 'id' | 'status'> & { status?: CoreCapability['status'] }));
     if (request.method === 'GET' && url.pathname === '/v1/core/runtime/capabilities') return write(response, 200, await host.discoverCapabilities(context, url.searchParams.get('query') ?? ''));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/authorize') return write(response, 200, await host.authorizeInvocation(context, await readJson(request) as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve') return write(response, 200, await host.resolveCapability(context, await readJson(request) as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/authorize') return write(response, 200, await host.authorizeInvocation(context, await json() as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve') return write(response, 200, await host.resolveCapability(context, await json() as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes') return write(response, 200, await host.nodeDescribe(context, { id: url.searchParams.get('id') ?? '' }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept') return write(response, 201, await host.nodeAccept(context, await readJson(request) as Parameters<typeof host.nodeAccept>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-child') return write(response, 201, await host.nodeIssueChild(context, await readJson(request) as Parameters<typeof host.nodeIssueChild>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-basis') return write(response, 201, await host.nodeIssueBasis(context, await readJson(request) as { nodeId: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-parent') return write(response, 200, await host.nodeSetParent(context, await readJson(request) as { nodeId: string; parentId: string; parentAddress?: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-basis') return write(response, 200, await host.nodeSetBasis(context, await readJson(request) as { nodeId: string; basis: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept') return write(response, 201, await host.nodeAccept(context, await json() as Parameters<typeof host.nodeAccept>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-child') return write(response, 201, await host.nodeIssueChild(context, await json() as Parameters<typeof host.nodeIssueChild>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/issue-basis') return write(response, 201, await host.nodeIssueBasis(context, await json() as { nodeId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-parent') return write(response, 200, await host.nodeSetParent(context, await json() as { nodeId: string; parentId: string; parentAddress?: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/set-basis') return write(response, 200, await host.nodeSetBasis(context, await json() as { nodeId: string; basis: string }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/nodes/children') return write(response, 200, await host.nodeChildren(context, { id: url.searchParams.get('id') ?? '' }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/add-children') return write(response, 200, await host.nodeAddChildren(context, await readJson(request) as Parameters<typeof host.nodeAddChildren>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/remove-child') return write(response, 200, await host.nodeRemoveChild(context, await readJson(request) as Parameters<typeof host.nodeRemoveChild>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/next-basis') return write(response, 200, await host.nodeSetNextBasis(context, await readJson(request) as Parameters<typeof host.nodeSetNextBasis>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/key-limits') return write(response, 200, await host.nodeSetKeyLimits(context, await readJson(request) as Parameters<typeof host.nodeSetKeyLimits>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-list-complete') return write(response, 200, await host.nodeSetChildListComplete(context, await readJson(request) as Parameters<typeof host.nodeSetChildListComplete>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept-retired') return write(response, 201, await host.nodeAcceptRetired(context, await readJson(request) as Parameters<typeof host.nodeAcceptRetired>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire') return write(response, 200, await host.nodeRetire(context, await readJson(request) as { nodeId: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/add-children') return write(response, 200, await host.nodeAddChildren(context, await json() as Parameters<typeof host.nodeAddChildren>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/remove-child') return write(response, 200, await host.nodeRemoveChild(context, await json() as Parameters<typeof host.nodeRemoveChild>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/next-basis') return write(response, 200, await host.nodeSetNextBasis(context, await json() as Parameters<typeof host.nodeSetNextBasis>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/key-limits') return write(response, 200, await host.nodeSetKeyLimits(context, await json() as Parameters<typeof host.nodeSetKeyLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/child-list-complete') return write(response, 200, await host.nodeSetChildListComplete(context, await json() as Parameters<typeof host.nodeSetChildListComplete>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/accept-retired') return write(response, 201, await host.nodeAcceptRetired(context, await json() as Parameters<typeof host.nodeAcceptRetired>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire') return write(response, 200, await host.nodeRetire(context, await json() as { nodeId: string }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/local') return write(response, 200, await host.topologyLocal(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/walk-down') return write(response, 200, await host.topologyWalkDown(context, { nodeId: url.searchParams.get('nodeId') ?? '', nodeAddress: url.searchParams.get('nodeAddress') ?? undefined, view: url.searchParams.get('view') ?? undefined, maxDepth: url.searchParams.get('maxDepth') ?? undefined }));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/walk-up') return write(response, 200, await host.topologyWalkUp(context, { nodeId: url.searchParams.get('nodeId') ?? '', nodeAddress: url.searchParams.get('nodeAddress') ?? undefined }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/create') return write(response, 201, await host.topologyCreate(context, await readJson(request) as Parameters<typeof host.topologyCreate>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/create') return write(response, 201, await host.topologyCreate(context, await json() as Parameters<typeof host.topologyCreate>[1]));
     if (request.method === 'GET' && url.pathname === '/v1/core/authority/block') return write(response, 200, await host.firstIdBlockStatus(context));
-    if (request.method === 'POST' && url.pathname === '/v1/core/authority/block') return write(response, 201, await host.grantFirstIdBlock(context, await readJson(request) as { block: number; note?: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/authority/install-codes') return write(response, 201, await host.issueInstallCode(context, await readJson(request) as { note?: string }));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/install-machine') return write(response, 201, await host.topologyInstallMachine(context, await readJson(request) as Parameters<typeof host.topologyInstallMachine>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as Parameters<typeof host.topologyInsertAbove>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/add-parent-above') return write(response, 201, await host.topologyAddParentAbove(context, await readJson(request) as Parameters<typeof host.topologyAddParentAbove>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await readJson(request) as Parameters<typeof host.topologyReplaceLost>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/suspend') return write(response, 200, await host.topologySuspend(context, await readJson(request) as Parameters<typeof host.topologySuspend>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/resume') return write(response, 200, await host.topologyResume(context, await readJson(request) as Parameters<typeof host.topologyResume>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/seat-limits') return write(response, 200, await host.topologySeatLimits(context, await readJson(request) as Parameters<typeof host.topologySeatLimits>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/recount-seats') return write(response, 200, await host.topologyRecountSeats(context, await readJson(request) as Parameters<typeof host.topologyRecountSeats>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-change') return write(response, 200, await host.nodeSeatChange(context, await readJson(request) as Parameters<typeof host.nodeSeatChange>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-limits') return write(response, 200, await host.nodeSeatLimits(context, await readJson(request) as Parameters<typeof host.nodeSeatLimits>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-count') return write(response, 200, await host.nodeSeatCount(context, await readJson(request) as Parameters<typeof host.nodeSeatCount>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/retire-away') return write(response, 200, await host.topologyRetireAway(context, await readJson(request) as Parameters<typeof host.topologyRetireAway>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire-child') return write(response, 200, await host.nodeRetireChild(context, await readJson(request) as Parameters<typeof host.nodeRetireChild>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/shutdown') return write(response, 200, await host.nodeSetShutdown(context, await readJson(request) as Parameters<typeof host.nodeSetShutdown>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/mark-child') return write(response, 200, await host.nodeMarkChild(context, await readJson(request) as Parameters<typeof host.nodeMarkChild>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/check-in') return write(response, 200, await host.nodeCheckIn(context, await readJson(request) as Parameters<typeof host.nodeCheckIn>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/authority/block') return write(response, 201, await host.grantFirstIdBlock(context, await json() as { block: number; note?: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/authority/install-codes') return write(response, 201, await host.issueInstallCode(context, await json() as { note?: string }));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/install-machine') return write(response, 201, await host.topologyInstallMachine(context, await json() as Parameters<typeof host.topologyInstallMachine>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await json() as Parameters<typeof host.topologyInsertAbove>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/add-parent-above') return write(response, 201, await host.topologyAddParentAbove(context, await json() as Parameters<typeof host.topologyAddParentAbove>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await json() as Parameters<typeof host.topologyReplaceLost>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/suspend') return write(response, 200, await host.topologySuspend(context, await json() as Parameters<typeof host.topologySuspend>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/resume') return write(response, 200, await host.topologyResume(context, await json() as Parameters<typeof host.topologyResume>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/seat-limits') return write(response, 200, await host.topologySeatLimits(context, await json() as Parameters<typeof host.topologySeatLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/recount-seats') return write(response, 200, await host.topologyRecountSeats(context, await json() as Parameters<typeof host.topologyRecountSeats>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-change') return write(response, 200, await host.nodeSeatChange(context, await json() as Parameters<typeof host.nodeSeatChange>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-limits') return write(response, 200, await host.nodeSeatLimits(context, await json() as Parameters<typeof host.nodeSeatLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/seat-count') return write(response, 200, await host.nodeSeatCount(context, await json() as Parameters<typeof host.nodeSeatCount>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/retire-away') return write(response, 200, await host.topologyRetireAway(context, await json() as Parameters<typeof host.topologyRetireAway>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/retire-child') return write(response, 200, await host.nodeRetireChild(context, await json() as Parameters<typeof host.nodeRetireChild>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/shutdown') return write(response, 200, await host.nodeSetShutdown(context, await json() as Parameters<typeof host.nodeSetShutdown>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/mark-child') return write(response, 200, await host.nodeMarkChild(context, await json() as Parameters<typeof host.nodeMarkChild>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/check-in') return write(response, 200, await host.nodeCheckIn(context, await json() as Parameters<typeof host.nodeCheckIn>[1]));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/check-in-status') return write(response, 200, await host.topologyCheckInStatus(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-in') return write(response, 200, await host.topologyCheckIn(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/key-limit-status') return write(response, 200, await host.topologyKeyLimitStatus(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/key-limit-check') return write(response, 200, await host.topologyKeyLimitCheck(context));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/key-limits') return write(response, 200, await host.topologySetKeyLimits(context, await readJson(request) as Parameters<typeof host.topologySetKeyLimits>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/adopt-issued') return write(response, 201, await host.topologyAdoptIssued(context, await readJson(request) as Parameters<typeof host.topologyAdoptIssued>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/rehome') return write(response, 200, await host.topologyRehome(context, await readJson(request) as Parameters<typeof host.topologyRehome>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/remove') return write(response, 200, await host.topologyRemove(context, await readJson(request) as Parameters<typeof host.topologyRemove>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/roll-up') return write(response, 200, await host.topologyRollUp(context, await readJson(request) as Parameters<typeof host.topologyRollUp>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/repair-parent') return write(response, 200, await host.topologyRepairParent(context, await readJson(request) as Parameters<typeof host.topologyRepairParent>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-children') return write(response, 200, await host.topologyCheckChildren(context, await readJson(request) as Parameters<typeof host.topologyCheckChildren>[1]));
-    if (request.method === 'POST' && url.pathname === '/v1/core/topology/mark-child-list') return write(response, 200, await host.topologyMarkChildList(context, await readJson(request) as Parameters<typeof host.topologyMarkChildList>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/key-limits') return write(response, 200, await host.topologySetKeyLimits(context, await json() as Parameters<typeof host.topologySetKeyLimits>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/adopt-issued') return write(response, 201, await host.topologyAdoptIssued(context, await json() as Parameters<typeof host.topologyAdoptIssued>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/rehome') return write(response, 200, await host.topologyRehome(context, await json() as Parameters<typeof host.topologyRehome>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/remove') return write(response, 200, await host.topologyRemove(context, await json() as Parameters<typeof host.topologyRemove>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/roll-up') return write(response, 200, await host.topologyRollUp(context, await json() as Parameters<typeof host.topologyRollUp>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/repair-parent') return write(response, 200, await host.topologyRepairParent(context, await json() as Parameters<typeof host.topologyRepairParent>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-children') return write(response, 200, await host.topologyCheckChildren(context, await json() as Parameters<typeof host.topologyCheckChildren>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/mark-child-list') return write(response, 200, await host.topologyMarkChildList(context, await json() as Parameters<typeof host.topologyMarkChildList>[1]));
     return write(response, 404, { error: { code: 'NOT_FOUND', message: 'Core Host endpoint not found' } });
   } catch (error) {
     const { status, code, message } = classify(error);

@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { LocalNodes } from '../src/topology/local-nodes.js';
 import { PrismaLocalNodeStore } from '../src/topology/prisma-local-node-store.js';
 import { PrismaSemaCoreHostStore } from '../src/host/prisma-host-store.js';
+import { PrismaClientKeyStore } from '../src/keys/client-keys.js';
 
 // The PostgreSQL stores, against a real database. The other tests use the in-memory stores, so a mistake
 // in the SQL is only caught here. Point SEMA_CORE_TEST_DATABASE_URL at an empty, migrated database that
@@ -155,6 +156,17 @@ try {
   // A row with a type Core does not know is reported, never read as something else.
   await prisma.$executeRaw`UPDATE "sema_local_nodes" SET "type" = 'PRINTER' WHERE "id" = '3-T4'`;
   await assert.rejects(() => nodes.describe('3-T4'), /unknown type/);
+  // Programs' public keys: added once, listed by program, revoked but kept as a record.
+  const clientKeys = new PrismaClientKeyStore(prisma);
+  const jwk = { kty: 'EC', crv: 'P-256', x: 'qIVYZVLCrPZHGHjP17CTW0_-D9Lfw0EkjqF7xB4FivA', y: 'Mc4nN9LTDOBhfoUeg8Ye9WedFRhnZXZJA12Qp0zZ6F0' };
+  const addedKey = await clientKeys.add({ keyId: 'test-key', applicationKey: 'console', publicJwk: jwk });
+  assert.deepEqual([addedKey.keyId, addedKey.applicationKey, addedKey.publicJwk, addedKey.revokedAt], ['test-key', 'console', jwk, undefined]);
+  await assert.rejects(() => clientKeys.add({ keyId: 'test-key', applicationKey: 'other', publicJwk: jwk }), /already registered/);
+  assert.deepEqual((await clientKeys.list('console')).map((key) => key.keyId), ['test-key']);
+  assert.deepEqual(await clientKeys.list('other'), []);
+  assert.equal(await clientKeys.revoke('test-key'), true);
+  assert.equal(await clientKeys.revoke('test-key'), false, 'revoking twice changes nothing');
+  assert.ok((await clientKeys.get('test-key'))!.revokedAt, 'a revoked key stays as a record');
   console.log('PostgreSQL local nodes test passed.');
 } finally {
   await prisma.$disconnect();

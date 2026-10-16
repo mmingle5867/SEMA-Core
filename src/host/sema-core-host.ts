@@ -4,6 +4,10 @@ import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostValidationErro
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CheckInRun, CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
+import { publicKeyFromJwk, keyIdOf, verifyP256, verifyRequest, type NonceMemory, type SignableRequest } from '../keys/signatures.js';
+import type { StoredKey } from '../keys/machine-key.js';
+import type { ClientKeyStore } from '../keys/client-keys.js';
+import type { JsonWebKey } from 'node:crypto';
 import { checkKeyLimits, isNodeType, type KeyLimits, type LocalNodes, type NodeType, type Shutdown, type Suspension } from '../topology/local-nodes.js';
 import { Conversations, limitNotes, type AddressedPeers, type NodePeer } from '../topology/conversations.js';
 import { encodeBase56 } from '../identity/base56.js';
@@ -46,6 +50,9 @@ function validateSettings(input: unknown, current: CoreHostSettings): CoreHostSe
 }
 
 /** Installation backend: settings, operational statistics, docs, and Core runtime access. */
+/** The keys a Core uses: its own machine key, the public keys programs registered, and the memory of nonces seen. */
+export interface CoreKeys { machine: StoredKey; clients: ClientKeyStore; nonces: NonceMemory; windowSeconds?: number }
+
 export class SemaCoreHost {
   constructor(
     private readonly core: SemaCore,
@@ -54,6 +61,7 @@ export class SemaCoreHost {
     private readonly version: string = SEMA_CORE_VERSION,
     private readonly localNodes?: LocalNodes,
     private readonly topology?: CoreTopologyOptions,
+    private readonly keys?: CoreKeys,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -189,6 +197,10 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/topology/nodes/next-basis', purpose: 'Keep a basis fetched early on a node held here, ready to take over when its counter would pass switchAt. Used between Cores.' },
         { method: 'POST', path: '/v1/core/topology/suspend', purpose: 'Suspend a node: its parent marks it, and its own Core locks itself and stays readable. Suspending a machine node locks that whole Core. Nodes below lock at their next check-in. Needs core.authority.suspend.' },
         { method: 'POST', path: '/v1/core/topology/resume', purpose: 'Resume a suspended node: clear its parent\'s mark and its own lock. Nodes below unlock at their next check-in. Needs core.authority.resume.' },
+        { method: 'GET', path: '/v1/core/keys', purpose: 'This Core\'s own machine key: its ID, algorithm and public half (P-256, JWK).' },
+        { method: 'POST', path: '/v1/core/keys/clients', purpose: 'A program registers its own public key (P-256, JWK) with proof that it holds the private half; from then on it may sign its requests instead of sending its secret.' },
+        { method: 'GET', path: '/v1/core/keys/clients', purpose: 'The keys the calling program has registered.' },
+        { method: 'POST', path: '/v1/core/keys/clients/revoke', purpose: 'A program revokes one of its own keys; requests signed with it are refused from then on.' },
         { method: 'POST', path: '/v1/core/topology/seat-limits', purpose: 'Set or clear an organization\'s allowed numbers of user and machine seats (users, machines; null clears). A division cannot allow more than its parent organization. Needs core.authority.seats.' },
         { method: 'POST', path: '/v1/core/topology/recount-seats', purpose: 'Count an organization\'s seats again by walking down its lists; lowers a count only when everything answered.' },
         { method: 'POST', path: '/v1/core/topology/nodes/seat-change', purpose: 'Take seats on an organization node held here, or give them back (negative). Used between Cores.' },
@@ -569,6 +581,61 @@ export class SemaCoreHost {
   topologyRetireAway(context: CoreHostRequestContext, input: { nodeId: string; nodeAddress?: string; parentId: string; parentAddress?: string; reason: string }) {
     const nodeId = this.text(input.nodeId, 'nodeId'), parentId = this.text(input.parentId, 'parentId'), reason = this.text(input.reason, 'reason');
     return this.conversation(context, 'core.topology.node-retired-away', [nodeId, parentId], (talk) => talk.retireAway({ nodeId, nodeAddress: this.address(input.nodeAddress, 'nodeAddress'), parentId, parentAddress: this.address(input.parentAddress, 'parentAddress'), reason, ...(context.actorId ? { by: context.actorId } : {}) }), () => ({ reason }), 'core.authority.retire');
+  }
+
+  // Keys and signed requests (D-121 to D-123). Programs may sign their requests instead of sending a secret.
+  private requireKeys() { if (!this.keys) throw new CoreHostValidationError('Keys are not set up on this Core'); return this.keys; }
+  private requireCaller(context: CoreHostRequestContext) { if (!context.actorId) throw new CoreHostAuthorizationError('Only a program that has proved who it is may manage its keys'); return context.actorId; }
+  /** This Core's own machine key: its ID, algorithm and public half. Anyone allowed to read the topology may see it. */
+  async machineKey(context: CoreHostRequestContext) {
+    await this.requireRead(context, 'core.topology.read');
+    const machine = this.requireKeys().machine;
+    return { keyId: machine.keyId, alg: 'ecdsa-p256-sha256', publicKey: machine.publicJwk };
+  }
+  /**
+   * A program registers its own public key. It proves who it is the old way (its key and secret, or a key it registered
+   * before), and proves it holds the new private key by signing the line "sema-key-registration", its application key
+   * and the new key's ID, one per line. A program can only register keys for itself.
+   */
+  async registerClientKey(context: CoreHostRequestContext, input: { publicKey: JsonWebKey; proof: string }) {
+    const applicationKey = this.requireCaller(context);
+    const shutdown = await this.lockedBy();
+    if (shutdown) throw new CoreHostLockedError(`This Core is shut down: ${shutdown.reason}. It refuses changes until it is resumed`);
+    let publicKey; let keyId: string;
+    try { publicKey = publicKeyFromJwk(input.publicKey); keyId = keyIdOf(input.publicKey); } catch (error) { throw new CoreHostValidationError(error instanceof Error ? error.message : 'publicKey must be a P-256 public key in JWK form'); }
+    if (typeof input.proof !== 'string' || !input.proof) throw new CoreHostValidationError('proof must be the base64 signature of the registration line');
+    if (!verifyP256(publicKey, Buffer.from(`sema-key-registration\n${applicationKey}\n${keyId}`, 'utf8'), Buffer.from(input.proof, 'base64'))) throw new CoreHostValidationError('The proof does not match the key: sign "sema-key-registration", the application key and the key ID, one per line, with the new private key');
+    const keys = this.requireKeys();
+    const existing = await keys.clients.get(keyId);
+    if (existing) throw new CoreHostValidationError(existing.applicationKey === applicationKey ? `Key ${keyId} is already registered` : `Key ${keyId} belongs to another program`);
+    const added = await keys.clients.add({ keyId, applicationKey, publicJwk: { kty: 'EC', crv: 'P-256', x: input.publicKey.x, y: input.publicKey.y } });
+    await this.core.recordAudit({ action: 'core.keys.client-registered', actorId: applicationKey, subjectIds: [keyId], evidence: { applicationKey } });
+    return added;
+  }
+  /** The keys the calling program has registered. */
+  async listClientKeys(context: CoreHostRequestContext) { return this.requireKeys().clients.list(this.requireCaller(context)); }
+  /** A program revokes one of its own keys. */
+  async revokeClientKey(context: CoreHostRequestContext, input: { keyId: string }) {
+    const applicationKey = this.requireCaller(context), keyId = this.text(input.keyId, 'keyId');
+    const keys = this.requireKeys();
+    const key = await keys.clients.get(keyId);
+    if (!key || key.applicationKey !== applicationKey) throw new CoreHostValidationError(`Key ${keyId} is not one of this program's keys`);
+    const revoked = await keys.clients.revoke(keyId);
+    if (revoked) await this.core.recordAudit({ action: 'core.keys.client-revoked', actorId: applicationKey, subjectIds: [keyId], evidence: { applicationKey } });
+    return { keyId, revoked };
+  }
+  /**
+   * Checks a signed request and says which program sent it. Throws, saying why, when the signature is missing, wrong,
+   * too old, copied, or made with a key that is not registered or was revoked.
+   */
+  async authenticateSigned(request: SignableRequest) {
+    const keys = this.requireKeys();
+    const { keyId } = await verifyRequest(request, {
+      nonces: keys.nonces,
+      windowSeconds: keys.windowSeconds ?? 60,
+      publicKey: async (id) => { const key = await keys.clients.get(id); return key && !key.revokedAt ? publicKeyFromJwk(key.publicJwk) : undefined; },
+    });
+    return (await keys.clients.get(keyId))!.applicationKey;
   }
 
   private machineNodeId: string | undefined;

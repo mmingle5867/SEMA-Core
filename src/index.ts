@@ -9,3 +9,6 @@ export * from './host/index.js';
 export * from './topology/local-nodes.js';
 export * from './topology/conversations.js';
 export * from './topology/http-peers.js';
+export * from './keys/signatures.js';
+export * from './keys/machine-key.js';
+export * from './keys/client-keys.js';

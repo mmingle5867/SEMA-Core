@@ -196,6 +196,19 @@ model SemaLocalNode {
   @@map("sema_local_nodes")
 }
 
+/// A public key a program registered with this Core, to sign its requests instead of sending its secret. Only public
+/// halves are kept. A revoked key stays as a record.
+model SemaCoreClientKey {
+  keyId          String    @id
+  applicationKey String
+  publicJwk      String
+  createdAt      DateTime  @default(now())
+  revokedAt      DateTime?
+
+  @@index([applicationKey])
+  @@map("sema_core_client_keys")
+}
+
 /// One direct child of a node held by this Core, as the parent believes it to be. The child's own pointer is the
 /// truth. A list may hold too many entries, never too few.
 model SemaLocalNodeChild {
