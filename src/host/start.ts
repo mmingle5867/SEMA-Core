@@ -59,4 +59,7 @@ console.log(`SEMA Core v${SEMA_CORE_VERSION} listening on http://${hostname}:${p
 // How often to look for nodes nearing their organization's length limit and fetch a ready basis. 0 turns it off.
 const keyLimitCheckSeconds = Number(process.env.SEMA_CORE_KEY_LIMIT_CHECK_SECONDS ?? 300);
 host.startKeyLimitChecks(Number.isFinite(keyLimitCheckSeconds) ? keyLimitCheckSeconds * 1000 : 300_000);
+// How often each node held here checks in with its own parent, set by this Core's administrator. 0 turns it off.
+const checkInSeconds = Number(process.env.SEMA_CORE_CHECK_IN_SECONDS ?? 300);
+host.startCheckIns(Number.isFinite(checkInSeconds) ? checkInSeconds * 1000 : 300_000);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));

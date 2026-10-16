@@ -98,6 +98,15 @@ try {
   assert.deepEqual(await nodes.describe('3-T1'), { id: '3-T1', type: 'ORGANIZATION', parentId: '3', parentAddress: 'http://parent.example:4310', basis: '3-T1', childCount: 1, keyLimits: { maxSegments: 4, maxLastSegmentLength: 6 }, status: 'RETIRED' }, 'a retired node keeps its list, and its limits survived every change');
   await assert.rejects(() => nodes.addChildren('3-T1', [{ childId: '3-T8', type: 'USER' }]), /retired/);
 
+  // A check-in stamps the time on the child's entry, adding the entry if it was missing; a retired parent stamps nothing.
+  const first = await nodes.checkIn('3-T6', { childId: '3-T6-3', type: 'MACHINE', address: 'http://pc.example:4310' });
+  assert.equal(first.status === 'ACTIVE' && first.added, true, 'a missing entry is added');
+  const second = await nodes.checkIn('3-T6', { childId: '3-T6-3', type: 'MACHINE' });
+  assert.equal(second.status === 'ACTIVE' && second.added, false);
+  assert.deepEqual(await nodes.children('3-T6'), [{ childId: '3-T6-3', type: 'MACHINE', address: 'http://pc.example:4310', lastSeenAt: second.status === 'ACTIVE' ? second.lastSeenAt : '' }], 'the time is stored; the entry keeps its address');
+  assert.deepEqual(await nodes.checkIn('3-T1', { childId: '3-T3', type: 'USER' }), { status: 'RETIRED', parentId: '3', parentAddress: 'http://parent.example:4310' });
+  await assert.rejects(() => nodes.checkIn('3-T6', { childId: '3-T9', type: 'USER' }), /cannot sit under a SITE/);
+
   // A lost node's old ID is stored as retired, pointing at its replacement, and issues nothing.
   assert.deepEqual(await nodes.acceptRetired({ id: '3-T7', type: 'GROUP', replacementId: '3-T2', replacementAddress: 'http://here.example:4310' }), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });
   assert.deepEqual(await nodes.describe('3-T7'), { id: '3-T7', type: 'GROUP', parentId: '3-T2', parentAddress: 'http://here.example:4310', basis: '3-T7', childCount: 0, status: 'RETIRED' });

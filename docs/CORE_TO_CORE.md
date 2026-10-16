@@ -10,11 +10,12 @@ stored beside each parent pointer.
 | --- | --- |
 | `SEMA_CORE_ADDRESS` | The stable name other Cores use to reach this one, e.g. `http://neo-main:4310`. Stored beside every pointer to a node held here. Leave unset on a single-machine setup. |
 | `SEMA_CORE_PEER_APPLICATION_KEY`, `SEMA_CORE_PEER_SECRET` | The shared application credential presented to other Cores. It must be registered in each Core's `SEMA_APPLICATION_CLIENTS_JSON`. Later replaced by per-machine keys. |
+| `SEMA_CORE_CHECK_IN_SECONDS` | How often each node held here checks in with its own parent (see "Check-ins"). Set by this Core's administrator. Default 300 seconds; 0 turns it off. Optional. |
 | `SEMA_CORE_KEY_LIMIT_CHECK_SECONDS` | How often the key-limit check runs (see "Key limits"). Default 300 seconds; 0 turns it off. Optional. |
 
 Without the peer credential a Core still works alone; the conversation routes answer that they are not configured.
 
-## Routes (all need `core.topology.write`, except the two reads)
+## Routes (all need `core.topology.write`, except the reads)
 
 | Route | What it does |
 | --- | --- |
@@ -33,6 +34,8 @@ Without the peer credential a Core still works alone; the conversation routes an
 | `POST /v1/core/topology/repair-parent` `{nodeId, nodeAddress?}` | Point a node whose parent was retired at its nearest live ancestor, adding it to that ancestor's list first. |
 | `POST /v1/core/topology/check-children` `{nodeId, nodeAddress?}` | Check a node's list against its children's own pointers. See below. |
 | `POST /v1/core/topology/mark-child-list` `{nodeId, nodeAddress?, complete}` | An administrator says whether a node's list of children is complete. |
+| `POST /v1/core/topology/check-in` | Check in now: every active node this Core holds checks in with its own parent. Returns the report. See "Check-ins". |
+| `GET /v1/core/topology/check-in-status` | The last round's report, or `null` before the first. Needs `core.topology.read`. |
 
 An address left out means "this Core". Each operation is audited by the Core that ran it.
 
@@ -46,7 +49,18 @@ Each node keeps a list of its direct children. It replaced the child count, and 
 - **A list may be marked as possibly incomplete,** as on a node that replaced a lost one. A node is childless only when its list is empty and known to be complete. Removing such a node, or a node whose list it inherits, passes the mark on.
 - **A retired node keeps its list as it was,** as a record. It gains no new children.
 - Nodes recorded before the list existed had only a count. Any that had children are marked as possibly incomplete by the migration.
-- Not built yet: check-ins. The table has a column for when a child last checked in, which is empty until they exist.
+- An entry also holds `lastSeenAt`, when the child last checked in (see "Check-ins"). It is empty until the child has checked in.
+
+## Check-ins
+
+Each active node a Core holds checks in with its own parent: when Core starts, on a timer (`SEMA_CORE_CHECK_IN_SECONDS`, default 300, set by the machine's administrator), and on request (`POST /v1/core/topology/check-in`). Between Cores it is `POST /v1/core/topology/nodes/check-in` `{nodeId, childId, type, address?}` on the parent's Core.
+
+- **The parent stamps the time** on the child's entry (`lastSeenAt`). The tree view shows it. It is never the basis of a decision.
+- **A child missing from its parent's list is added,** if it is a type the parent may hold. The child's pointer is the truth, and a list may hold too many entries, never too few. Adding an entry is audited (`core.topology.child-added-by-check-in`); an ordinary check-in is not, because it is routine.
+- **A retired parent stamps nothing** and answers with its own pointer. The child then follows the chain to the nearest live ancestor and adds itself there (the same as `repair-parent`), which is audited.
+- **The report** lists each node held here: `CHECKED_IN`, `TOP` (no parent), `UNREACHABLE` (the parent's Core did not answer), `PARENT_RETIRED` (with `newParentId` when it moved), or `FAILED` with a reason. It is kept in memory only (`GET /v1/core/topology/check-in-status`) and rebuilt by the next round.
+- Times come from the machine's own clock until the Core clock is built.
+- Not built yet: checking in straight after a change to the node, and the other work the check-in is meant to carry (keyholder-list changes, Core update notices, proof of life for grants, learning that the node has been shut down).
 ## Node type
 
 Every node has a `type`. Core lists only the types its own rules treat differently:

@@ -129,6 +129,9 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/insert-above') return write(response, 201, await host.topologyInsertAbove(context, await readJson(request) as Parameters<typeof host.topologyInsertAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/add-parent-above') return write(response, 201, await host.topologyAddParentAbove(context, await readJson(request) as Parameters<typeof host.topologyAddParentAbove>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/replace-lost') return write(response, 201, await host.topologyReplaceLost(context, await readJson(request) as Parameters<typeof host.topologyReplaceLost>[1]));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/nodes/check-in') return write(response, 200, await host.nodeCheckIn(context, await readJson(request) as Parameters<typeof host.nodeCheckIn>[1]));
+    if (request.method === 'GET' && url.pathname === '/v1/core/topology/check-in-status') return write(response, 200, await host.topologyCheckInStatus(context));
+    if (request.method === 'POST' && url.pathname === '/v1/core/topology/check-in') return write(response, 200, await host.topologyCheckIn(context));
     if (request.method === 'GET' && url.pathname === '/v1/core/topology/key-limit-status') return write(response, 200, await host.topologyKeyLimitStatus(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/key-limit-check') return write(response, 200, await host.topologyKeyLimitCheck(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/topology/key-limits') return write(response, 200, await host.topologySetKeyLimits(context, await readJson(request) as Parameters<typeof host.topologySetKeyLimits>[1]));
