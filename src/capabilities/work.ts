@@ -3,7 +3,7 @@ import type { SemaCore } from '../core/sema-core.js';
 import type { CoreLifecycleStatus, JsonObject, JsonValue } from '../core/types.js';
 import type { CapabilityStore, CapabilityVersion, ChoosingWay, ServiceInstance, ServiceVersion } from './records.js';
 import { CapabilityRecordError } from './registry.js';
-import { valueProblems } from './schema.js';
+import { schemaProblems, valueProblems } from './schema.js';
 
 /**
  * Commands to a capability (phase 2, D-160 to D-167). An application asks for an operation of a capability; Core checks
@@ -136,8 +136,12 @@ export class CapabilityWork {
     const capability = await this.records.findCapabilityVersion(capabilityKey, version);
     let plan: { capability: CapabilityVersion; operation: string; way: ChoosingWay; requested: ServiceVersion[]; live: Map<string, ServiceInstance[]>; reasons: string[] } | Error;
     try { plan = await this.plan(capability, capabilityKey, version, input); } catch (error) { plan = error as Error; }
-    // May.
-    if (!(await mayUse(capabilityKey))) {
+    // May: the capability, and the job when the operation names one (D-174). The job key is read before anything else is
+    // checked, so a caller who may not use the job learns nothing more.
+    const requested = capability?.operations.find((item) => item.key === input.operation);
+    const job = requested?.job && input.input && typeof input.input === 'object' ? (input.input as Record<string, unknown>)[requested.job] as { key?: unknown } | undefined : undefined;
+    const jobKey = typeof job?.key === 'string' && /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(job.key) ? job.key : undefined;
+    if (!(await mayUse(capabilityKey)) || (jobKey !== undefined && !(await mayUse(`${capabilityKey}.job.${jobKey}`)))) {
       await this.core.recordAudit({ action: 'capability.command.refused', actorId: caller, evidence: { capabilityKey, version, reason: 'not allowed' } });
       throw new NotAllowedError();
     }
@@ -154,6 +158,12 @@ export class CapabilityWork {
     if (operation.input) {
       const problems = valueProblems(operation.input, body, 'input');
       if (problems.length) throw new CapabilityRecordError(`The input does not match ${capabilityKey} ${version}: ${problems.join('; ')}`);
+    }
+    if (operation.job && !jobKey) throw new CapabilityRecordError(`${capabilityKey} ${version} needs input.${operation.job}.key, the job this call is for: lowercase words joined by dots or hyphens`);
+    if (operation.answerShape) {
+      const shape = (body as Record<string, unknown>)[operation.answerShape.input];
+      const problems = schemaProblems(shape, `input.${operation.answerShape.input}`);
+      if (problems.length) throw new CapabilityRecordError(`The requested answer shape cannot be checked: ${problems.slice(0, 5).join('; ')}`);
     }
     // Execute: one execution per chosen service. Under dynamic, the rest wait in order in case the first declines.
     const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: (plan.way === 'consensus' ? chosen : plan.requested).map((service) => service.id), input: body };
@@ -228,6 +238,11 @@ export class CapabilityWork {
         const payload = command.payload as unknown as Payload;
         const operation = (await this.records.getCapabilityVersion(payload.capabilityVersionId))!.operations.find((item) => item.key === payload.operation);
         const problems = operation?.output ? valueProblems(operation.output, input.answer, 'answer') : [];
+        // The answer also matches the shape the caller asked for (D-174).
+        if (!problems.length && operation?.answerShape) {
+          const shape = (payload.input as Record<string, unknown>)[operation.answerShape.input] as JsonObject;
+          problems.push(...valueProblems(shape, (input.answer as Record<string, unknown>)?.[operation.answerShape.output], `answer.${operation.answerShape.output}`));
+        }
         if (problems.length) throw new CapabilityRecordError(`The answer does not match ${payload.capabilityKey} ${payload.version}: ${problems.join('; ')}`);
       }
       const reference = input.reference === undefined ? undefined : text(input.reference, 'reference', 2000);

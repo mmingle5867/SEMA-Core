@@ -189,8 +189,20 @@ export class CapabilityRegistry {
         const problems = schemaProblems(item[part], `operation ${operationKey} ${part}`);
         if (problems.length) throw new CapabilityRecordError(problems.slice(0, 5).join('; '));
       }
+      const properties = (part: 'input' | 'output') => isObject(item[part]) && isObject((item[part] as JsonObject).properties) ? (item[part] as JsonObject).properties as JsonObject : undefined;
+      let answerShape: OperationDefinition['answerShape'];
+      if (item.answerShape !== undefined) {
+        const shape = item.answerShape;
+        if (!isObject(shape) || typeof shape.input !== 'string' || typeof shape.output !== 'string') throw new CapabilityRecordError(`operation ${operationKey} answerShape must name an input and an output property`);
+        if (!properties('input')?.[shape.input]) throw new CapabilityRecordError(`operation ${operationKey} answerShape.input must be a property of its input`);
+        if (!properties('output')?.[shape.output]) throw new CapabilityRecordError(`operation ${operationKey} answerShape.output must be a property of its output`);
+        answerShape = { input: shape.input, output: shape.output };
+      }
+      if (item.job !== undefined && (typeof item.job !== 'string' || !properties('input')?.[item.job])) throw new CapabilityRecordError(`operation ${operationKey} job must name a property of its input`);
       return {
         key: operationKey, required: item.required,
+        ...(answerShape ? { answerShape } : {}),
+        ...(typeof item.job === 'string' ? { job: item.job } : {}),
         ...(item.description === undefined ? {} : { description: text(item.description, 'operation description', 2000) }),
         ...(item.input === undefined ? {} : { input: item.input as JsonObject }),
         ...(item.output === undefined ? {} : { output: item.output as JsonObject }),

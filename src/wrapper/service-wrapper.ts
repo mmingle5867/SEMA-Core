@@ -27,7 +27,7 @@ export type HandlerResult = { answer: JsonValue; outcome?: Outcome } | { referen
 export type Outcome = 'achieved' | 'partly' | 'not-achieved' | 'needs-review';
 export type Handler = (input: JsonValue, work: Work) => Promise<HandlerResult>;
 /** A capability contract as published (a SEMA-Capabilities definition file): only the parts the wrapper checks. */
-export interface Contract { capabilityKey: string; version: string; operations: Array<{ key: string; output?: { [key: string]: JsonValue } }> }
+export interface Contract { capabilityKey: string; version: string; operations: Array<{ key: string; output?: { [key: string]: JsonValue }; answerShape?: { input: string; output: string } }> }
 
 export interface ServiceWrapperOptions {
   coreUrl: string;
@@ -161,8 +161,13 @@ export class ServiceWrapper {
     try {
       const result = await handler!(work.input, work);
       if ('answer' in result) {
-        const output = this.options.contract.operations.find((operation) => operation.key === work.operation)?.output;
-        const problems = output ? valueProblems(output, result.answer, 'answer') : [];
+        const operation = this.options.contract.operations.find((item) => item.key === work.operation);
+        const problems = operation?.output ? valueProblems(operation.output, result.answer, 'answer') : [];
+        // A general capability's answer must also match the shape the caller asked for.
+        if (!problems.length && operation?.answerShape) {
+          const shape = (work.input as Record<string, JsonValue>)?.[operation.answerShape.input] as { [key: string]: JsonValue };
+          problems.push(...valueProblems(shape, (result.answer as Record<string, JsonValue>)?.[operation.answerShape.output], `answer.${operation.answerShape.output}`));
+        }
         report = problems.length
           ? { status: 'FAILED', error: `The service's answer does not match ${work.capabilityKey} ${work.version}: ${problems.join('; ')}` }
           : { status: 'SUCCESS', answer: result.answer, ...(result.outcome ? { outcome: result.outcome } : {}) };
