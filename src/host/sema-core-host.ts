@@ -13,6 +13,7 @@ import { Conversations, limitNotes, type AddressedPeers, type NodePeer } from '.
 import { encodeBase56 } from '../identity/base56.js';
 import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './install-code.js';
 import { FIRST_NODE_ID } from './join.js';
+import { CapabilityRecordError, isReservedKey, type CapabilityRegistry } from '../capabilities/registry.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
 export interface CoreTopologyOptions {
@@ -62,6 +63,7 @@ export class SemaCoreHost {
     private readonly localNodes?: LocalNodes,
     private readonly topology?: CoreTopologyOptions,
     private readonly keys?: CoreKeys,
+    private readonly capabilityRecords?: CapabilityRegistry,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -72,6 +74,11 @@ export class SemaCoreHost {
       await this.store.saveHostSettings(settings);
     }
     this.core.setMaxReservationSize(settings.values.maxReservationSize);
+    // The old single capability records are moved to the four records on every start; whatever is already moved is left alone.
+    if (this.capabilityRecords) {
+      const { moved } = await this.capabilityRecords.moveLegacy(await this.store.getCapabilitiesForHost(), true);
+      if (moved) await this.core.recordAudit({ action: 'core.capabilities.legacy-moved', actorId: context.actorId, evidence: { moved } });
+    }
     return { state, settings };
   }
 
@@ -145,7 +152,59 @@ export class SemaCoreHost {
 
   async registerCapability(context: CoreHostRequestContext, input: Omit<CoreCapability, 'id' | 'status'> & { status?: CoreCapability['status'] }) {
     await this.requireAdministration(context, 'core.capabilities.register');
-    return this.core.registerCapability(input);
+    const capability = await this.core.registerCapability(input);
+    // Until every program registers the new way, the old route also writes the new records. Not approved for a sema. name.
+    if (this.capabilityRecords) await this.capabilityRecords.moveLegacy([capability], false);
+    return capability;
+  }
+
+  // The capability and service layer (D-151 to D-159): capability versions, service versions, installations, instances.
+  private requireCapabilityRecords() { if (!this.capabilityRecords) throw new CoreHostValidationError('Capability records are not set up on this Core'); return this.capabilityRecords; }
+  private async records<T>(work: (records: CapabilityRegistry) => Promise<T>) {
+    try { return await work(this.requireCapabilityRecords()); } catch (error) { if (error instanceof CapabilityRecordError) throw new CoreHostValidationError(error.message); throw error; }
+  }
+  /** Only a caller holding core.capabilities.approve, held by nobody by default, may use a name in the reserved sema. namespace (D-104). */
+  private async mayUseReserved(context: CoreHostRequestContext, name: unknown) {
+    return typeof name === 'string' && isReservedKey(name.trim()) && this.authorization.canAdminister({ actorId: context.actorId, resource: 'core.capabilities.approve' });
+  }
+  /** Every capability version, service version, installation and instance this Core holds. */
+  async capabilityRecordList(context: CoreHostRequestContext) { await this.requireRead(context, 'core.capabilities.read'); return this.records((records) => records.list()); }
+  async registerCapabilityVersion(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['registerCapabilityVersion']>[0]) {
+    await this.requireAdministration(context, 'core.capabilities.register');
+    const approved = await this.mayUseReserved(context, input?.capabilityKey);
+    const record = await this.records((records) => records.registerCapabilityVersion(input ?? {} as never, approved));
+    await this.core.recordAudit({ action: 'core.capabilities.version-registered', actorId: context.actorId, subjectIds: [record.id], evidence: { capabilityKey: record.capabilityKey, version: record.version } });
+    return record;
+  }
+  async registerServiceVersion(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['registerServiceVersion']>[0]) {
+    await this.requireAdministration(context, 'core.capabilities.register');
+    const approved = await this.mayUseReserved(context, input?.serviceKey);
+    const record = await this.records((records) => records.registerServiceVersion(input ?? {} as never, approved));
+    await this.core.recordAudit({ action: 'core.services.version-registered', actorId: context.actorId, subjectIds: [record.id, record.capabilityVersionId], evidence: { serviceKey: record.serviceKey, version: record.version } });
+    return record;
+  }
+  async installService(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['install']>[0]) {
+    await this.requireAdministration(context, 'core.services.install');
+    const record = await this.records((records) => records.install(input ?? {} as never));
+    await this.core.recordAudit({ action: 'core.services.installed', actorId: context.actorId, subjectIds: [record.id, record.serviceVersionId], evidence: {} });
+    return record;
+  }
+  async startServiceInstance(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['startInstance']>[0]) {
+    await this.requireAdministration(context, 'core.services.run');
+    const record = await this.records((records) => records.startInstance(input ?? {} as never));
+    await this.core.recordAudit({ action: 'core.services.instance-started', actorId: context.actorId, subjectIds: [record.id, record.installationId], evidence: { capacity: record.capacity } });
+    return record;
+  }
+  /** Check-ins are frequent, so they are not audited. */
+  async checkInServiceInstance(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['checkIn']>[0]) {
+    await this.requireAdministration(context, 'core.services.run');
+    return this.records((records) => records.checkIn(input ?? {} as never));
+  }
+  async stopServiceInstance(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['stopInstance']>[0]) {
+    await this.requireAdministration(context, 'core.services.run');
+    const record = await this.records((records) => records.stopInstance(input ?? {} as never));
+    await this.core.recordAudit({ action: 'core.services.instance-stopped', actorId: context.actorId, subjectIds: [record.id, record.installationId], evidence: {} });
+    return record;
   }
 
   async discoverCapabilities(context: CoreHostRequestContext, query = '') {
@@ -237,10 +296,17 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/runtime/executions/complete', purpose: 'Complete a Core execution and optionally record its result.' },
         { method: 'POST', path: '/v1/core/runtime/events', purpose: 'Record a Core event in the shared Core database.' },
         { method: 'POST', path: '/v1/core/runtime/audits', purpose: 'Record a Core audit entry in the shared Core database.' },
-        { method: 'POST', path: '/v1/core/runtime/capabilities', purpose: 'Register or update a Core capability.' },
+        { method: 'POST', path: '/v1/core/runtime/capabilities', purpose: 'Register or update an old single capability record; also writes the new records. Replaced by the routes below.' },
         { method: 'GET', path: '/v1/core/runtime/capabilities', purpose: 'Discover active Core capabilities.' },
         { method: 'POST', path: '/v1/core/runtime/capabilities/authorize', purpose: 'Authorize a Core capability invocation.' },
         { method: 'POST', path: '/v1/core/runtime/capabilities/resolve', purpose: 'Resolve an authorized Core capability.' },
+        { method: 'GET', path: '/v1/core/capabilities/records', purpose: 'Every capability version, service version, installation and instance this Core holds.' },
+        { method: 'POST', path: '/v1/core/capabilities/versions', purpose: 'Publish a capability version: its key, version and operations. A sema. name needs core.capabilities.approve.' },
+        { method: 'POST', path: '/v1/core/services/versions', purpose: 'Publish a service version for a capability version: the operations it offers and where it runs, offline and on which systems.' },
+        { method: 'POST', path: '/v1/core/services/installations', purpose: 'Install a service version on this machine, once. Needs core.services.install.' },
+        { method: 'POST', path: '/v1/core/services/instances', purpose: 'Record a running copy of an installed service. Needs core.services.run.' },
+        { method: 'POST', path: '/v1/core/services/instances/check-in', purpose: 'A running copy checks in, with what it has now.' },
+        { method: 'POST', path: '/v1/core/services/instances/stop', purpose: 'A running copy stops; a new start is a new instance.' },
       ],
       settings: [
         { key: 'maxReservationSize', description: 'Maximum IDs granted by one reservation request.' },
