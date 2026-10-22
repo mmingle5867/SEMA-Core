@@ -78,12 +78,16 @@ model SemaCoreExecution {
 
   @@index([commandId, createdAt])
   @@index([status, createdAt])
+  @@index([providerId, status])
   @@map("sema_core_executions")
 }
 
 model SemaCoreResult {
   id          String   @id
-  executionId String
+  /// The execution an answer belongs to; empty on a capability command's one result.
+  executionId String?
+  /// The command a capability command's one result belongs to (one per command).
+  commandId   String?
   resultType  String
   subjectIds  Json     @default("[]")
   data        Json     @default("{}")
@@ -240,6 +244,8 @@ model SemaCapabilityVersion {
   displayName   String
   description   String
   operations    Json     @default("[]")
+  /// The ways of choosing its services the capability permits (D-162).
+  choosing      Json     @default("[]")
   /// A name in the reserved sema. namespace that was approved (D-104).
   approved      Boolean  @default(false)
   /// Moved from the old single capability record; its contract is not written yet.
@@ -291,7 +297,10 @@ model SemaServiceInstance {
   capacity       Int      @default(1)
   resources      Json     @default("{}")
   state          String   @default("RUNNING")
+  /// The program that started it; it can never issue a capability command (D-160).
+  applicationKey String?
 
   @@index([installationId])
+  @@index([applicationKey])
   @@map("sema_core_service_instances")
 }

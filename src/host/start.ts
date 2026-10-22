@@ -15,6 +15,8 @@ import { PrismaClientKeyStore } from '../keys/client-keys.js';
 import { NonceMemory } from '../keys/signatures.js';
 import { CapabilityRegistry } from '../capabilities/registry.js';
 import { PrismaCapabilityStore } from '../capabilities/prisma-capability-store.js';
+import { CapabilityWork } from '../capabilities/work.js';
+import { PrismaWorkStore } from '../capabilities/prisma-work-store.js';
 
 const port = Number(process.env.SEMA_CORE_PORT ?? '4310');
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('SEMA_CORE_PORT must be a valid port');
@@ -63,8 +65,12 @@ const keyFile = process.env.SEMA_CORE_KEY_FILE ?? join(process.cwd(), 'keys', pr
 const machineKey = await new FileKeyStore(keyFile).open();
 console.log(`Machine key ${machineKey.keyId}`);
 // The capability and service records (D-151). Every ID comes from this Core's own counter; installations are on this machine.
-const capabilityRecords = new CapabilityRegistry(new PrismaCapabilityStore(prisma), async (typeCode, metadata) => (await core.issueIdentifier(typeCode, metadata)).id, async () => installationId);
-const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology, { machine: machineKey, clients: new PrismaClientKeyStore(prisma), nonces: new NonceMemory() }, capabilityRecords);
+const issue = async (typeCode: string, metadata: import('../core/types.js').JsonObject) => (await core.issueIdentifier(typeCode, metadata)).id;
+const capabilityStore = new PrismaCapabilityStore(prisma);
+const capabilityRecords = new CapabilityRegistry(capabilityStore, issue, async () => installationId);
+// Commands to a capability, their executions and results (phase 2).
+const capabilityWork = new CapabilityWork(core, capabilityStore, new PrismaWorkStore(prisma), issue);
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology, { machine: machineKey, clients: new PrismaClientKeyStore(prisma), nonces: new NonceMemory() }, capabilityRecords, capabilityWork);
 
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname, port, applicationClients: clients });

@@ -4,19 +4,19 @@ import type { CapabilityStore, CapabilityVersion, OperationDefinition, ServiceIn
 
 const iso = (value: Date | string) => new Date(value).toISOString();
 
-type CapabilityRow = Omit<CapabilityVersion, 'createdAt' | 'operations'> & { operations: unknown; createdAt: Date };
-const toCapability = (row: CapabilityRow): CapabilityVersion => ({ ...row, operations: row.operations as OperationDefinition[], createdAt: iso(row.createdAt) });
+type CapabilityRow = Omit<CapabilityVersion, 'createdAt' | 'operations' | 'choosing'> & { operations: unknown; choosing: unknown; createdAt: Date };
+const toCapability = (row: CapabilityRow): CapabilityVersion => ({ ...row, operations: row.operations as OperationDefinition[], choosing: row.choosing as CapabilityVersion['choosing'], createdAt: iso(row.createdAt) });
 type ServiceRow = Omit<ServiceVersion, 'createdAt' | 'operations' | 'extensions' | 'declarations'> & { operations: unknown; extensions: unknown; declarations: unknown; createdAt: Date };
 const toService = (row: ServiceRow): ServiceVersion => ({ ...row, operations: row.operations as string[], extensions: row.extensions as string[], declarations: row.declarations as JsonObject, createdAt: iso(row.createdAt) });
 type InstallationRow = { id: string; serviceVersionId: string; machineNodeId: string; settingsRef: string | null; endpointUrl: string | null; installedAt: Date };
 const toInstallation = (row: InstallationRow): ServiceInstallation => ({ id: row.id, serviceVersionId: row.serviceVersionId, machineNodeId: row.machineNodeId, ...(row.settingsRef ? { settingsRef: row.settingsRef } : {}), ...(row.endpointUrl ? { endpointUrl: row.endpointUrl } : {}), installedAt: iso(row.installedAt) });
-type InstanceRow = Omit<ServiceInstance, 'startedAt' | 'lastCheckInAt' | 'resources'> & { startedAt: Date; lastCheckInAt: Date; resources: unknown };
-const toInstance = (row: InstanceRow): ServiceInstance => ({ ...row, resources: row.resources as JsonObject, startedAt: iso(row.startedAt), lastCheckInAt: iso(row.lastCheckInAt) });
+type InstanceRow = Omit<ServiceInstance, 'startedAt' | 'lastCheckInAt' | 'resources' | 'applicationKey'> & { startedAt: Date; lastCheckInAt: Date; resources: unknown; applicationKey: string | null };
+const toInstance = ({ applicationKey, ...row }: InstanceRow): ServiceInstance => ({ ...row, resources: row.resources as JsonObject, startedAt: iso(row.startedAt), lastCheckInAt: iso(row.lastCheckInAt), ...(applicationKey ? { applicationKey } : {}) });
 
-const CAPABILITY = `SELECT "id", "capabilityKey", "version", "displayName", "description", "operations", "approved", "legacy", "status", "createdAt" FROM "sema_core_capability_versions"`;
+const CAPABILITY = `SELECT "id", "capabilityKey", "version", "displayName", "description", "operations", "choosing", "approved", "legacy", "status", "createdAt" FROM "sema_core_capability_versions"`;
 const SERVICE = `SELECT "id", "serviceKey", "version", "capabilityVersionId", "displayName", "operations", "extensions", "declarations", "legacy", "status", "createdAt" FROM "sema_core_service_versions"`;
 const INSTALLATION = `SELECT "id", "serviceVersionId", "machineNodeId", "settingsRef", "endpointUrl", "installedAt" FROM "sema_core_service_installations"`;
-const INSTANCE = `SELECT "id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state" FROM "sema_core_service_instances"`;
+const INSTANCE = `SELECT "id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state", "applicationKey" FROM "sema_core_service_instances"`;
 
 /**
  * PostgreSQL store for the capability and service records. Plain SQL, like the node store. Times are UTC: each record
@@ -30,8 +30,8 @@ export class PrismaCapabilityStore implements CapabilityStore {
 
   async addCapabilityVersion(record: CapabilityVersion) {
     await this.added(await this.prisma.$executeRaw`
-      INSERT INTO "sema_core_capability_versions" ("id", "capabilityKey", "version", "displayName", "description", "operations", "approved", "legacy", "status", "createdAt")
-      VALUES (${record.id}, ${record.capabilityKey}, ${record.version}, ${record.displayName}, ${record.description}, ${JSON.stringify(record.operations)}::jsonb, ${record.approved}, ${record.legacy}, ${record.status}, ${record.createdAt}::timestamp)
+      INSERT INTO "sema_core_capability_versions" ("id", "capabilityKey", "version", "displayName", "description", "operations", "choosing", "approved", "legacy", "status", "createdAt")
+      VALUES (${record.id}, ${record.capabilityKey}, ${record.version}, ${record.displayName}, ${record.description}, ${JSON.stringify(record.operations)}::jsonb, ${JSON.stringify(record.choosing)}::jsonb, ${record.approved}, ${record.legacy}, ${record.status}, ${record.createdAt}::timestamp)
       ON CONFLICT DO NOTHING`, `Capability ${record.capabilityKey} ${record.version}`);
   }
   getCapabilityVersion(id: string) { return this.one(`${CAPABILITY} WHERE "id" = $1`, [id], toCapability); }
@@ -60,8 +60,8 @@ export class PrismaCapabilityStore implements CapabilityStore {
 
   async addInstance(record: ServiceInstance) {
     await this.added(await this.prisma.$executeRaw`
-      INSERT INTO "sema_core_service_instances" ("id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state")
-      VALUES (${record.id}, ${record.installationId}, ${record.startedAt}::timestamp, ${record.lastCheckInAt}::timestamp, ${record.capacity}, ${JSON.stringify(record.resources)}::jsonb, ${record.state})
+      INSERT INTO "sema_core_service_instances" ("id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state", "applicationKey")
+      VALUES (${record.id}, ${record.installationId}, ${record.startedAt}::timestamp, ${record.lastCheckInAt}::timestamp, ${record.capacity}, ${JSON.stringify(record.resources)}::jsonb, ${record.state}, ${record.applicationKey ?? null})
       ON CONFLICT DO NOTHING`, `Instance ${record.id}`);
   }
   getInstance(id: string) { return this.one(`${INSTANCE} WHERE "id" = $1`, [id], toInstance); }
@@ -72,7 +72,7 @@ export class PrismaCapabilityStore implements CapabilityStore {
         "resources" = COALESCE($3::jsonb, "resources"),
         "state" = COALESCE($4, "state")
       WHERE "id" = $1
-      RETURNING "id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state"`,
+      RETURNING "id", "installationId", "startedAt", "lastCheckInAt", "capacity", "resources", "state", "applicationKey"`,
     [id, change.lastCheckInAt ?? null, change.resources === undefined ? null : JSON.stringify(change.resources), change.state ?? null], toInstance);
     if (!updated) throw new Error(`Instance ${id} does not exist`);
     return updated;

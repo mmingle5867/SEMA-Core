@@ -16,6 +16,13 @@ export interface OperationDefinition {
   output?: JsonObject;
 }
 
+/**
+ * The ways a command may choose services (N2, D-162): exactly one and no other; a list tried in order; all of them
+ * (or those listed); or the organization's rules (not built yet).
+ */
+export const CHOOSING_WAYS = ['bound', 'dynamic', 'consensus', 'policy'] as const;
+export type ChoosingWay = typeof CHOOSING_WAYS[number];
+
 export interface CapabilityVersion {
   id: string;
   capabilityKey: string;
@@ -23,6 +30,8 @@ export interface CapabilityVersion {
   displayName: string;
   description: string;
   operations: OperationDefinition[];
+  /** The ways of choosing its services that the capability permits (D-162). Empty for a record moved from the old ones: it cannot be run by command. */
+  choosing: ChoosingWay[];
   /** A name under the reserved `sema.` namespace may be used only when approved (D-104). */
   approved: boolean;
   /** Moved from the old single capability record; its contract is not written yet. */
@@ -75,6 +84,8 @@ export interface ServiceInstance {
   /** What it last reported having: free memory, disk, network and so on (D-158). */
   resources: JsonObject;
   state: 'RUNNING' | 'STOPPED';
+  /** The program that started it. That program can never issue a capability command (D-160). Missing on instances recorded before 0.4.0. */
+  applicationKey?: string;
 }
 
 export interface CapabilityStore {
