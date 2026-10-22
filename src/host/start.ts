@@ -13,6 +13,8 @@ import { join } from 'node:path';
 import { FileKeyStore } from '../keys/machine-key.js';
 import { PrismaClientKeyStore } from '../keys/client-keys.js';
 import { NonceMemory } from '../keys/signatures.js';
+import { CapabilityRegistry } from '../capabilities/registry.js';
+import { PrismaCapabilityStore } from '../capabilities/prisma-capability-store.js';
 
 const port = Number(process.env.SEMA_CORE_PORT ?? '4310');
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('SEMA_CORE_PORT must be a valid port');
@@ -60,7 +62,9 @@ if (!topology) console.warn('SEMA_CORE_PEER_APPLICATION_KEY / SEMA_CORE_PEER_SEC
 const keyFile = process.env.SEMA_CORE_KEY_FILE ?? join(process.cwd(), 'keys', process.platform === 'win32' ? 'machine-key.dpapi' : 'machine-key.pem');
 const machineKey = await new FileKeyStore(keyFile).open();
 console.log(`Machine key ${machineKey.keyId}`);
-const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology, { machine: machineKey, clients: new PrismaClientKeyStore(prisma), nonces: new NonceMemory() });
+// The capability and service records (D-151). Every ID comes from this Core's own counter; installations are on this machine.
+const capabilityRecords = new CapabilityRegistry(new PrismaCapabilityStore(prisma), async (typeCode, metadata) => (await core.issueIdentifier(typeCode, metadata)).id, async () => installationId);
+const host = new SemaCoreHost(core, store, authorization, SEMA_CORE_VERSION, localNodes, topology, { machine: machineKey, clients: new PrismaClientKeyStore(prisma), nonces: new NonceMemory() }, capabilityRecords);
 
 await host.initialize();
 const server = await startCoreHostHttpServer(host, { hostname, port, applicationClients: clients });

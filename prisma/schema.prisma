@@ -231,3 +231,67 @@ model SemaLocalNodeChild {
   @@id([parentId, childId])
   @@map("sema_local_node_children")
 }
+
+/// The capability and service layer (D-151). A capability version is a contract; a published one never changes.
+model SemaCapabilityVersion {
+  id            String   @id
+  capabilityKey String
+  version       String
+  displayName   String
+  description   String
+  operations    Json     @default("[]")
+  /// A name in the reserved sema. namespace that was approved (D-104).
+  approved      Boolean  @default(false)
+  /// Moved from the old single capability record; its contract is not written yet.
+  legacy        Boolean  @default(false)
+  status        String   @default("ACTIVE")
+  createdAt     DateTime
+
+  @@unique([capabilityKey, version])
+  @@map("sema_core_capability_versions")
+}
+
+/// One published version of one provider's software for one capability version. Never changes.
+model SemaServiceVersion {
+  id                  String   @id
+  serviceKey          String
+  version             String
+  capabilityVersionId String
+  displayName         String
+  operations          Json     @default("[]")
+  extensions          Json     @default("[]")
+  declarations        Json     @default("{}")
+  legacy              Boolean  @default(false)
+  status              String   @default("ACTIVE")
+  createdAt           DateTime
+
+  @@unique([serviceKey, version, capabilityVersionId])
+  @@index([capabilityVersionId])
+  @@map("sema_core_service_versions")
+}
+
+/// A service version installed on this machine, once. Its settings and secrets stay with the service.
+model SemaServiceInstallation {
+  id               String   @id
+  serviceVersionId String   @unique
+  machineNodeId    String
+  settingsRef      String?
+  endpointUrl      String?
+  installedAt      DateTime
+
+  @@map("sema_core_service_installations")
+}
+
+/// A running copy of an installed service. A stopped instance stays as a record; a new start is a new instance.
+model SemaServiceInstance {
+  id             String   @id
+  installationId String
+  startedAt      DateTime
+  lastCheckInAt  DateTime
+  capacity       Int      @default(1)
+  resources      Json     @default("{}")
+  state          String   @default("RUNNING")
+
+  @@index([installationId])
+  @@map("sema_core_service_instances")
+}

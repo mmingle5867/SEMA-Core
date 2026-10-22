@@ -23,7 +23,7 @@ const completed = await host.completeExecution({ actorId: 'admin' }, { execution
 assert.equal(completed.execution.status, 'SUCCESS');
 await host.registerCapability({ actorId: 'admin' }, { capabilityKey: 'host.test', displayName: 'Host test', description: 'Host test capability', providerKey: 'test', version: '1.0.0', metadata: {} });
 assert.equal((await host.resolveCapability({ actorId: 'admin' }, { capabilityKey: 'host.test' })).providerKey, 'test');
-assert.equal((await host.documentation({ actorId: 'admin' })).endpoints.length, 72);
+assert.equal((await host.documentation({ actorId: 'admin' })).endpoints.length, 79);
 
 // One version everywhere: package.json, the Core manifest and the host documentation.
 const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;

@@ -4,6 +4,7 @@ import { LocalNodes } from '../src/topology/local-nodes.js';
 import { PrismaLocalNodeStore } from '../src/topology/prisma-local-node-store.js';
 import { PrismaSemaCoreHostStore } from '../src/host/prisma-host-store.js';
 import { PrismaClientKeyStore } from '../src/keys/client-keys.js';
+import { PrismaCapabilityStore } from '../src/capabilities/prisma-capability-store.js';
 
 // The PostgreSQL stores, against a real database. The other tests use the in-memory stores, so a mistake
 // in the SQL is only caught here. Point SEMA_CORE_TEST_DATABASE_URL at an empty, migrated database that
@@ -169,6 +170,30 @@ try {
   assert.equal(await clientKeys.revoke('test-key'), false, 'revoking twice changes nothing');
   const revokedAt = (await clientKeys.get('test-key'))!.revokedAt;
   assert.ok(revokedAt && Math.abs(Date.parse(revokedAt) - Date.now()) < 60_000, 'a revoked key stays as a record, with its time in UTC');
+  // The capability and service records: written and read back whole, times in UTC, each kept once.
+  const capabilities = new PrismaCapabilityStore(prisma);
+  const when = new Date().toISOString();
+  const capability = { id: 'cap-1', capabilityKey: 'neo.listing.write-copy', version: '1.0.0', displayName: 'Write copy', description: 'Writes copy', operations: [{ key: 'write', required: true, input: { type: 'object' } }], approved: false, legacy: false, status: 'ACTIVE' as const, createdAt: when };
+  await capabilities.addCapabilityVersion(capability);
+  assert.deepEqual(await capabilities.getCapabilityVersion('cap-1'), capability);
+  assert.deepEqual(await capabilities.findCapabilityVersion('neo.listing.write-copy', '1.0.0'), capability);
+  await assert.rejects(() => capabilities.addCapabilityVersion({ ...capability, id: 'cap-2' }), /already exists/, 'one record per key and version');
+  const service = { id: 'svc-1', serviceKey: 'neo.ai.copy', version: '1.0.0', capabilityVersionId: 'cap-1', displayName: 'Copy', operations: ['write', 'translate'], extensions: ['translate'], declarations: { runsWhere: 'remote', offline: false, systems: ['windows'] }, legacy: false, status: 'ACTIVE' as const, createdAt: when };
+  await capabilities.addServiceVersion(service);
+  assert.deepEqual(await capabilities.findServiceVersion('neo.ai.copy', '1.0.0', 'cap-1'), service);
+  const installation = { id: 'ins-1', serviceVersionId: 'svc-1', machineNodeId: '3', endpointUrl: 'http://127.0.0.1:4320/x', installedAt: when };
+  await capabilities.addInstallation(installation);
+  assert.deepEqual(await capabilities.findInstallation('svc-1'), installation);
+  await assert.rejects(() => capabilities.addInstallation({ ...installation, id: 'ins-2' }), /already exists/, 'installed once per machine');
+  const instance = { id: 'run-1', installationId: 'ins-1', startedAt: when, lastCheckInAt: when, capacity: 2, resources: { memoryMb: 900 }, state: 'RUNNING' as const };
+  await capabilities.addInstance(instance);
+  const later = new Date(Date.now() + 1000).toISOString();
+  assert.deepEqual(await capabilities.updateInstance('run-1', { lastCheckInAt: later, resources: { memoryMb: 400 } }), { ...instance, lastCheckInAt: later, resources: { memoryMb: 400 } });
+  assert.deepEqual(await capabilities.updateInstance('run-1', { state: 'STOPPED' }), { ...instance, lastCheckInAt: later, resources: { memoryMb: 400 }, state: 'STOPPED' }, 'a change leaves the rest as it was');
+  await assert.rejects(() => capabilities.updateInstance('run-9', { state: 'STOPPED' }), /does not exist/);
+  assert.deepEqual([(await capabilities.listCapabilityVersions()).length, (await capabilities.listServiceVersions()).length, (await capabilities.listInstallations()).length, (await capabilities.listInstances()).length], [1, 1, 1, 1]);
+  const stored = (await prisma.$queryRaw<Array<{ text: string }>>`SELECT "createdAt"::text AS text FROM "sema_core_capability_versions" WHERE "id" = 'cap-1'`)[0].text;
+  assert.equal(stored.replace(' ', 'T').slice(0, 19), when.slice(0, 19), 'stored as UTC wall time');
   console.log('PostgreSQL local nodes test passed.');
 } finally {
   await prisma.$disconnect();
