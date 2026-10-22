@@ -40,7 +40,7 @@ assert.equal(blurs.find((item) => item.version === '1.0.0')!.id, blur.id);
 assert.notEqual(blurs.find((item) => item.version === '1.1.0')!.id, blur2.id, 'the old record kept its ID, which the first version already holds');
 
 // Publishing a capability version.
-const copy = { capabilityKey: 'neo.listing.write-copy', version: '1.0.0', displayName: 'Write listing copy', description: 'Writes a title and description', operations: [
+const copy = { capabilityKey: 'neo.listing.write-copy', version: '1.0.0', choosing: ['consensus', 'dynamic', 'bound'], displayName: 'Write listing copy', description: 'Writes a title and description', operations: [
   { key: 'write', required: true, input: { type: 'object' }, output: { type: 'object' } },
   { key: 'rewrite', required: false },
 ] };

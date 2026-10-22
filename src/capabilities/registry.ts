@@ -1,5 +1,6 @@
 import type { CoreCapability, JsonObject } from '../core/types.js';
-import type { CapabilityStore, CapabilityVersion, OperationDefinition, ServiceDeclarations, ServiceInstallation, ServiceInstance, ServiceVersion } from './records.js';
+import { CHOOSING_WAYS, type CapabilityStore, type CapabilityVersion, type ChoosingWay, type OperationDefinition, type ServiceDeclarations, type ServiceInstallation, type ServiceInstance, type ServiceVersion } from './records.js';
+import { schemaProblems } from './schema.js';
 
 /** A refusal the caller can fix: a bad name, a missing operation, an unknown record. */
 export class CapabilityRecordError extends Error {
@@ -43,16 +44,17 @@ export class CapabilityRegistry {
   ) {}
 
   /** `approved` is true only when the caller holds the permission to use the reserved `sema.` names. */
-  async registerCapabilityVersion(input: { capabilityKey: unknown; version: unknown; displayName: unknown; description?: unknown; operations: unknown }, approved: boolean) {
+  async registerCapabilityVersion(input: { capabilityKey: unknown; version: unknown; displayName: unknown; description?: unknown; operations: unknown; choosing: unknown }, approved: boolean) {
     const capabilityKey = key(input.capabilityKey, 'capabilityKey'), checkedVersion = version(input.version);
     if (isReservedKey(capabilityKey) && !approved) throw new CapabilityRecordError(`${capabilityKey} is in the reserved sema. namespace, which needs approval`);
     const operations = this.operations(input.operations);
+    const choosing = this.choosing(input.choosing);
     if (await this.store.findCapabilityVersion(capabilityKey, checkedVersion)) throw new CapabilityRecordError(`${capabilityKey} ${checkedVersion} is already published; a changed contract is a new version`);
     const record: CapabilityVersion = {
       id: await this.issue('CAPABILITY', { capabilityKey, version: checkedVersion }),
       capabilityKey, version: checkedVersion, displayName: text(input.displayName, 'displayName'),
       description: input.description === undefined ? '' : text(input.description, 'description', 2000),
-      operations, approved: isReservedKey(capabilityKey), legacy: false, status: 'ACTIVE', createdAt: new Date().toISOString(),
+      operations, choosing, approved: isReservedKey(capabilityKey), legacy: false, status: 'ACTIVE', createdAt: new Date().toISOString(),
     };
     await this.store.addCapabilityVersion(record);
     return record;
@@ -100,7 +102,7 @@ export class CapabilityRegistry {
   }
 
   /** A running copy starts and says how many jobs it takes at once and what it has (D-158). */
-  async startInstance(input: { installationId: unknown; capacity?: unknown; resources?: unknown }) {
+  async startInstance(input: { installationId: unknown; capacity?: unknown; resources?: unknown }, applicationKey?: string) {
     const installation = await this.store.getInstallation(text(input.installationId, 'installationId'));
     if (!installation) throw new CapabilityRecordError(`Installation ${String(input.installationId)} is not on this machine`);
     const capacity = input.capacity === undefined ? 1 : input.capacity;
@@ -108,7 +110,7 @@ export class CapabilityRegistry {
     const now = new Date().toISOString();
     const record: ServiceInstance = {
       id: await this.issue('SERVICE-INSTANCE', { installationId: installation.id }),
-      installationId: installation.id, startedAt: now, lastCheckInAt: now, capacity: capacity as number, resources: this.resources(input.resources), state: 'RUNNING',
+      installationId: installation.id, startedAt: now, lastCheckInAt: now, capacity: capacity as number, resources: this.resources(input.resources), state: 'RUNNING', ...(applicationKey ? { applicationKey } : {}),
     };
     await this.store.addInstance(record);
     return record;
@@ -148,7 +150,7 @@ export class CapabilityRegistry {
       if (!capability) {
         const id = (await this.store.getCapabilityVersion(old.id)) ? await this.issue('CAPABILITY', { capabilityKey: old.capabilityKey, version: old.version }) : old.id;
         capability = {
-          id, capabilityKey: old.capabilityKey, version: old.version, displayName: old.displayName, description: old.description, operations: [],
+          id, capabilityKey: old.capabilityKey, version: old.version, displayName: old.displayName, description: old.description, operations: [], choosing: [],
           approved: approved && isReservedKey(old.capabilityKey), legacy: true, status: old.status, createdAt: new Date().toISOString(),
         };
         await this.store.addCapabilityVersion(capability);
@@ -181,7 +183,12 @@ export class CapabilityRegistry {
       const operationKey = text(item.key, 'operation key', 60);
       if (!OPERATION.test(operationKey)) throw new CapabilityRecordError(`operation key ${operationKey} must be lowercase words joined by hyphens`);
       if (typeof item.required !== 'boolean') throw new CapabilityRecordError(`operation ${operationKey} must say whether it is required`);
-      for (const part of ['input', 'output'] as const) if (item[part] !== undefined && !isObject(item[part])) throw new CapabilityRecordError(`operation ${operationKey} ${part} must be a JSON Schema object`);
+      for (const part of ['input', 'output'] as const) {
+        if (item[part] === undefined) continue;
+        if (!isObject(item[part])) throw new CapabilityRecordError(`operation ${operationKey} ${part} must be a JSON Schema object`);
+        const problems = schemaProblems(item[part], `operation ${operationKey} ${part}`);
+        if (problems.length) throw new CapabilityRecordError(problems.slice(0, 5).join('; '));
+      }
       return {
         key: operationKey, required: item.required,
         ...(item.description === undefined ? {} : { description: text(item.description, 'operation description', 2000) }),
@@ -192,6 +199,12 @@ export class CapabilityRegistry {
     if (new Set(operations.map((operation) => operation.key)).size !== operations.length) throw new CapabilityRecordError('operation keys must not repeat');
     if (!operations.some((operation) => operation.required)) throw new CapabilityRecordError('at least one operation must be required');
     return operations;
+  }
+
+  private choosing(value: unknown): ChoosingWay[] {
+    if (!Array.isArray(value) || !value.length || !value.every((way) => (CHOOSING_WAYS as readonly unknown[]).includes(way))) throw new CapabilityRecordError(`choosing must list the ways its services may be chosen: ${CHOOSING_WAYS.join(', ')}`);
+    if (new Set(value).size !== value.length) throw new CapabilityRecordError('choosing must not repeat a way');
+    return value as ChoosingWay[];
   }
 
   private declarations(value: unknown): ServiceDeclarations {

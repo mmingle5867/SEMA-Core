@@ -14,6 +14,7 @@ import { encodeBase56 } from '../identity/base56.js';
 import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './install-code.js';
 import { FIRST_NODE_ID } from './join.js';
 import { CapabilityRecordError, isReservedKey, type CapabilityRegistry } from '../capabilities/registry.js';
+import { NotAllowedError, type CapabilityWork } from '../capabilities/work.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
 export interface CoreTopologyOptions {
@@ -64,6 +65,7 @@ export class SemaCoreHost {
     private readonly topology?: CoreTopologyOptions,
     private readonly keys?: CoreKeys,
     private readonly capabilityRecords?: CapabilityRegistry,
+    private readonly capabilityWork?: CapabilityWork,
   ) {}
 
   async initialize(context: CoreHostRequestContext = { actorId: null }) {
@@ -191,7 +193,9 @@ export class SemaCoreHost {
   }
   async startServiceInstance(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['startInstance']>[0]) {
     await this.requireAdministration(context, 'core.services.run');
-    const record = await this.records((records) => records.startInstance(input ?? {} as never));
+    // A service never issues a command (D-160): a program key that has issued one cannot run a service either.
+    if (context.actorId && (await this.core.listCommands({ actorId: context.actorId, commandTypePrefix: 'capability.run', limit: 1 })).length) throw new CoreHostValidationError('This program key has issued capability commands, so it cannot run a service: a service runs under its own key (D-160)');
+    const record = await this.records((records) => records.startInstance(input ?? {} as never, context.actorId ?? undefined));
     await this.core.recordAudit({ action: 'core.services.instance-started', actorId: context.actorId, subjectIds: [record.id, record.installationId], evidence: { capacity: record.capacity } });
     return record;
   }
@@ -200,6 +204,39 @@ export class SemaCoreHost {
     await this.requireAdministration(context, 'core.services.run');
     return this.records((records) => records.checkIn(input ?? {} as never));
   }
+  // Commands to a capability (phase 2, D-160 to D-167).
+  private async work<T>(run: (work: CapabilityWork) => Promise<T>) {
+    if (!this.capabilityWork) throw new CoreHostValidationError('Capability commands are not set up on this Core');
+    try { return await run(this.capabilityWork); } catch (error) {
+      if (error instanceof NotAllowedError) throw new CoreHostAuthorizationError('Not allowed');
+      if (error instanceof CapabilityRecordError) throw new CoreHostValidationError(error.message);
+      throw error;
+    }
+  }
+  /** An application runs an operation of a capability. The "may" step is the permission capability.<key> (D-163). */
+  async runCapability(context: CoreHostRequestContext, input: Parameters<CapabilityWork['run']>[1]) {
+    await this.refuseWhileLocked();
+    return this.work((work) => work.run(context.actorId, input ?? {} as never, (capabilityKey) => this.authorization.canAdminister({ actorId: context.actorId, resource: `capability.${capabilityKey}` })));
+  }
+  /** The application that issued a command waits on it again, by its reference. */
+  async waitOnCapabilityCommand(context: CoreHostRequestContext, input: Parameters<CapabilityWork['waitOn']>[1]) { return this.work((work) => work.waitOn(context.actorId, input ?? {} as never)); }
+  async takeServiceWork(context: CoreHostRequestContext, input: Parameters<CapabilityWork['takeWork']>[1]) {
+    await this.requireAdministration(context, 'core.services.run');
+    return this.work((work) => work.takeWork(context.actorId, input ?? {} as never));
+  }
+  async answerServiceWork(context: CoreHostRequestContext, input: Parameters<CapabilityWork['answer']>[1]) {
+    await this.requireAdministration(context, 'core.services.run');
+    return this.work((work) => work.answer(context.actorId, input ?? {} as never));
+  }
+  async reportServiceWork(context: CoreHostRequestContext, input: Parameters<CapabilityWork['report']>[1]) {
+    await this.requireAdministration(context, 'core.services.run', true);
+    return this.work((work) => work.report(context.actorId, input ?? {} as never));
+  }
+  private async refuseWhileLocked() {
+    const shutdown = await this.lockedBy();
+    if (shutdown) throw new CoreHostLockedError(`This Core is shut down: ${shutdown.reason}. It refuses changes and work until it is resumed, and stays readable`);
+  }
+
   async stopServiceInstance(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['stopInstance']>[0]) {
     await this.requireAdministration(context, 'core.services.run');
     const record = await this.records((records) => records.stopInstance(input ?? {} as never));
@@ -307,6 +344,11 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/services/instances', purpose: 'Record a running copy of an installed service. Needs core.services.run.' },
         { method: 'POST', path: '/v1/core/services/instances/check-in', purpose: 'A running copy checks in, with what it has now.' },
         { method: 'POST', path: '/v1/core/services/instances/stop', purpose: 'A running copy stops; a new start is a new instance.' },
+        { method: 'POST', path: '/v1/core/capability-commands', purpose: 'Run an operation of a capability: the way of choosing its services, the services, the input and how long to wait (up to 60 s). Needs capability.<key>; otherwise "not allowed".' },
+        { method: 'POST', path: '/v1/core/capability-commands/wait', purpose: 'Wait again on a command this program issued: what each of its executions has done so far.' },
+        { method: 'POST', path: '/v1/core/services/instances/work', purpose: 'A running copy asks for work and is held up to 30 s until there is some. Counts as checking in.' },
+        { method: 'POST', path: '/v1/core/services/executions/answer', purpose: 'A running copy accepts the work it was offered, or declines it with a reason.' },
+        { method: 'POST', path: '/v1/core/services/executions/report', purpose: 'A running copy reports its result: an answer up to 64 KB, or a reference to where it stored a larger one; or that it failed.' },
       ],
       settings: [
         { key: 'maxReservationSize', description: 'Maximum IDs granted by one reservation request.' },

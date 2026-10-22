@@ -5,6 +5,7 @@ import { PrismaLocalNodeStore } from '../src/topology/prisma-local-node-store.js
 import { PrismaSemaCoreHostStore } from '../src/host/prisma-host-store.js';
 import { PrismaClientKeyStore } from '../src/keys/client-keys.js';
 import { PrismaCapabilityStore } from '../src/capabilities/prisma-capability-store.js';
+import { PrismaWorkStore } from '../src/capabilities/prisma-work-store.js';
 
 // The PostgreSQL stores, against a real database. The other tests use the in-memory stores, so a mistake
 // in the SQL is only caught here. Point SEMA_CORE_TEST_DATABASE_URL at an empty, migrated database that
@@ -173,7 +174,7 @@ try {
   // The capability and service records: written and read back whole, times in UTC, each kept once.
   const capabilities = new PrismaCapabilityStore(prisma);
   const when = new Date().toISOString();
-  const capability = { id: 'cap-1', capabilityKey: 'neo.listing.write-copy', version: '1.0.0', displayName: 'Write copy', description: 'Writes copy', operations: [{ key: 'write', required: true, input: { type: 'object' } }], approved: false, legacy: false, status: 'ACTIVE' as const, createdAt: when };
+  const capability = { id: 'cap-1', capabilityKey: 'neo.listing.write-copy', version: '1.0.0', displayName: 'Write copy', description: 'Writes copy', operations: [{ key: 'write', required: true, input: { type: 'object' } }], choosing: ['bound' as const, 'consensus' as const], approved: false, legacy: false, status: 'ACTIVE' as const, createdAt: when };
   await capabilities.addCapabilityVersion(capability);
   assert.deepEqual(await capabilities.getCapabilityVersion('cap-1'), capability);
   assert.deepEqual(await capabilities.findCapabilityVersion('neo.listing.write-copy', '1.0.0'), capability);
@@ -185,7 +186,7 @@ try {
   await capabilities.addInstallation(installation);
   assert.deepEqual(await capabilities.findInstallation('svc-1'), installation);
   await assert.rejects(() => capabilities.addInstallation({ ...installation, id: 'ins-2' }), /already exists/, 'installed once per machine');
-  const instance = { id: 'run-1', installationId: 'ins-1', startedAt: when, lastCheckInAt: when, capacity: 2, resources: { memoryMb: 900 }, state: 'RUNNING' as const };
+  const instance = { id: 'run-1', installationId: 'ins-1', startedAt: when, lastCheckInAt: when, capacity: 2, resources: { memoryMb: 900 }, state: 'RUNNING' as const, applicationKey: 'neo.ai.copy' };
   await capabilities.addInstance(instance);
   const later = new Date(Date.now() + 1000).toISOString();
   assert.deepEqual(await capabilities.updateInstance('run-1', { lastCheckInAt: later, resources: { memoryMb: 400 } }), { ...instance, lastCheckInAt: later, resources: { memoryMb: 400 } });
@@ -194,6 +195,31 @@ try {
   assert.deepEqual([(await capabilities.listCapabilityVersions()).length, (await capabilities.listServiceVersions()).length, (await capabilities.listInstallations()).length, (await capabilities.listInstances()).length], [1, 1, 1, 1]);
   const stored = (await prisma.$queryRaw<Array<{ text: string }>>`SELECT "createdAt"::text AS text FROM "sema_core_capability_versions" WHERE "id" = 'cap-1'`)[0].text;
   assert.equal(stored.replace(' ', 'T').slice(0, 19), when.slice(0, 19), 'stored as UTC wall time');
+  // Capability commands' executions and results, in Core's execution and result tables.
+  const work = new PrismaWorkStore(prisma);
+  const t0 = new Date(Date.now() - 2000).toISOString(), t1 = new Date(Date.now() - 1000).toISOString(), t2 = new Date().toISOString();
+  await work.addExecution({ id: 'ex-1', commandId: 'cmd-1', serviceVersionId: 'svc-1', status: 'PENDING', createdAt: t0 });
+  await work.addExecution({ id: 'ex-2', commandId: 'cmd-1', serviceVersionId: 'svc-1', status: 'PENDING', createdAt: t1 });
+  assert.deepEqual(await work.getExecution('ex-1'), { id: 'ex-1', commandId: 'cmd-1', serviceVersionId: 'svc-1', status: 'PENDING', createdAt: t0 });
+  const offered = (await work.claim('svc-1', 'run-1', t2, t0))!;
+  assert.deepEqual([offered.id, offered.status, offered.instanceId, offered.offeredAt], ['ex-1', 'WAITING', 'run-1', t2], 'the oldest waiting execution is offered');
+  assert.equal((await work.claim('svc-1', 'run-2', t2, t0))!.id, 'ex-2', 'a fresh offer is not offered again');
+  assert.equal(await work.claim('svc-1', 'run-2', t2, t0), undefined);
+  assert.equal(await work.claim('svc-9', 'run-2', t2, t0), undefined, 'only work for its own service version');
+  assert.equal((await work.claim('svc-1', 'run-2', t2, new Date(Date.now() + 1000).toISOString()))!.id, 'ex-1', 'an offer never answered is offered again once stale');
+  assert.equal(await work.change('ex-1', { status: 'WAITING', instanceId: 'run-1' }, { status: 'RUNNING', startedAt: t2 }), false, 'only the instance it was last offered to may answer');
+  assert.equal(await work.change('ex-1', { status: 'WAITING', instanceId: 'run-2' }, { status: 'RUNNING', startedAt: t2 }), true);
+  assert.equal(await work.change('ex-2', { status: 'WAITING', instanceId: 'run-2' }, { status: 'FAILED', completedAt: t2, notNow: { answer: 'decline', reason: 'busy' } }), true);
+  assert.deepEqual(await work.getExecution('ex-2'), { id: 'ex-2', commandId: 'cmd-1', serviceVersionId: 'svc-1', status: 'FAILED', instanceId: 'run-2', offeredAt: t2, completedAt: t2, notNow: { answer: 'decline', reason: 'busy' }, createdAt: t1 });
+  assert.equal(await work.change('ex-1', { status: 'RUNNING', instanceId: 'run-2' }, { status: 'FAILED', completedAt: t2, error: 'broke' }), true);
+  assert.equal((await work.getExecution('ex-1'))!.error, 'broke');
+  assert.deepEqual((await work.listExecutions('cmd-1')).map((execution) => execution.id), ['ex-1', 'ex-2']);
+  await work.addAnswer('res-1', { executionId: 'ex-1', outcome: 'achieved', answer: { text: 'hi' }, recordedAt: t2 });
+  assert.deepEqual(await work.getAnswer('ex-1'), { executionId: 'ex-1', outcome: 'achieved', answer: { text: 'hi' }, recordedAt: t2 });
+  const commandResult = { id: 'res-2', commandId: 'cmd-1', entries: [{ executionId: 'ex-1', serviceVersionId: 'svc-1', serviceKey: 'neo.ai.copy', status: 'SUCCESS' as const, answer: { text: 'hi' } }], recordedAt: t2 };
+  assert.equal(await work.addResult(commandResult), true);
+  assert.equal(await work.addResult({ ...commandResult, id: 'res-3' }), false, 'one command, one result');
+  assert.deepEqual(await work.getResult('cmd-1'), commandResult);
   console.log('PostgreSQL local nodes test passed.');
 } finally {
   await prisma.$disconnect();
