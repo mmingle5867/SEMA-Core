@@ -81,4 +81,8 @@ host.startKeyLimitChecks(Number.isFinite(keyLimitCheckSeconds) ? keyLimitCheckSe
 // How often each node held here checks in with its own parent, set by this Core's administrator. 0 turns it off.
 const checkInSeconds = Number(process.env.SEMA_CORE_CHECK_IN_SECONDS ?? 300);
 host.startCheckIns(Number.isFinite(checkInSeconds) ? checkInSeconds * 1000 : 300_000);
+// A service's running copy that has not checked in for this many minutes is marked lost (it was ended without saying
+// so). Checked every minute. 0 turns it off.
+const lostMinutes = Number(process.env.SEMA_CORE_INSTANCE_LOST_MINUTES ?? 10);
+host.startInstanceSweep(60_000, Number.isFinite(lostMinutes) ? lostMinutes * 60_000 : 600_000);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));

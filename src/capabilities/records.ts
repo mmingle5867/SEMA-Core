@@ -94,7 +94,8 @@ export interface ServiceInstance {
   capacity: number;
   /** What it last reported having: free memory, disk, network and so on (D-158). */
   resources: JsonObject;
-  state: 'RUNNING' | 'STOPPED';
+  /** STOPPED: it said it stopped. LOST: it stopped checking in, so Core marked it (a crash, a process ended outright, a power cut). */
+  state: 'RUNNING' | 'STOPPED' | 'LOST';
   /** The program that started it. That program can never issue a capability command (D-160). Missing on instances recorded before 0.4.0. */
   applicationKey?: string;
 }

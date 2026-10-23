@@ -127,6 +127,18 @@ export class CapabilityRegistry {
     return this.store.updateInstance(instance.id, { state: 'STOPPED', lastCheckInAt: new Date().toISOString() });
   }
 
+  /**
+   * Marks as lost every running copy that has not checked in for the time given: it was ended without saying so (a
+   * crash, a process ended outright, a power cut). Core never hands work to such a copy anyway; this keeps the records
+   * true. A copy that comes back finds itself lost and records a new instance. Says which were marked.
+   */
+  async markLost(silentForMs: number) {
+    const cutoff = Date.now() - silentForMs;
+    const lost = (await this.store.listInstances()).filter((instance) => instance.state === 'RUNNING' && Date.parse(instance.lastCheckInAt) < cutoff);
+    for (const instance of lost) await this.store.updateInstance(instance.id, { state: 'LOST' });
+    return lost.map((instance) => instance.id);
+  }
+
   async list() {
     const [capabilities, services, installations, instances] = await Promise.all([this.store.listCapabilityVersions(), this.store.listServiceVersions(), this.store.listInstallations(), this.store.listInstances()]);
     const byKey = <T>(items: T[], name: (item: T) => string) => items.sort((a, b) => name(a).localeCompare(name(b)));

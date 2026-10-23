@@ -94,4 +94,17 @@ assert.deepEqual([list.capabilities.length, list.services.length, list.installat
 granted.delete('core.capabilities.read');
 await assert.rejects(() => host.capabilityRecordList(app), /not authorized/);
 
+// A copy that stops checking in without saying so is marked lost; one that is checking in is left alone (D-151).
+const silent = await host.startServiceInstance(app, { installationId: installed.id });
+const lively = await host.startServiceInstance(app, { installationId: installed.id });
+await records.updateInstance(silent.id, { lastCheckInAt: new Date(Date.now() - 11 * 60_000).toISOString() });
+const timer = host.startInstanceSweep(60_000, 10 * 60_000);
+await new Promise((wait) => setTimeout(wait, 50));
+clearInterval(timer);
+assert.equal((await records.getInstance(silent.id))!.state, 'LOST');
+assert.equal((await records.getInstance(lively.id))!.state, 'RUNNING');
+assert.equal((await records.getInstance(first.id))!.state, 'STOPPED', 'a copy that said it stopped stays stopped, not lost');
+await assert.rejects(() => host.checkInServiceInstance(app, { instanceId: silent.id }), /has stopped; start a new one/, 'a lost copy that comes back records a new instance');
+assert.deepEqual(await registry.markLost(10 * 60_000), [], 'nothing more to mark');
+
 console.log('Capability records tests passed.');

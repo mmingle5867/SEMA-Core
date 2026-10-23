@@ -791,6 +791,21 @@ export class SemaCoreHost {
     timer.unref();
     return timer;
   }
+  /**
+   * Running copies that stop checking in are marked lost after `lostAfterMs`, checked every `intervalMs` (and once now).
+   * Each round that marks any is audited, naming them and why. The timer never keeps the process alive.
+   */
+  startInstanceSweep(intervalMs: number, lostAfterMs: number) {
+    if (!this.capabilityRecords || !(intervalMs > 0) || !(lostAfterMs > 0)) return undefined;
+    const sweep = async () => {
+      const lost = await this.capabilityRecords!.markLost(lostAfterMs);
+      if (lost.length) await this.core.recordAudit({ action: 'core.services.instances-lost', actorId: null, subjectIds: lost, evidence: { reason: `no check-in for ${Math.round(lostAfterMs / 60_000)} minutes` } });
+    };
+    sweep().catch(() => undefined);
+    const timer = setInterval(() => { sweep().catch(() => undefined); }, intervalMs);
+    timer.unref();
+    return timer;
+  }
   /** The last round's report, or null before the first one. */
   async topologyCheckInStatus(context: CoreHostRequestContext) { await this.requireRead(context, 'core.topology.read'); return this.lastCheckIns ?? null; }
   /** Checks in now and returns the report. */
