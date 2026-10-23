@@ -14,6 +14,17 @@ export interface OperationDefinition {
   /** JSON Schema for what goes in and what comes back (D-155). Checked from phase 2. */
   input?: JsonObject;
   output?: JsonObject;
+  /**
+   * For a general capability whose callers say what shape they want back (D-174): the input property that carries the
+   * requested shape (JSON Schema, within the supported subset), and the output property that must match it. Core checks
+   * the shape on the way in and the answer against it on the way back.
+   */
+  answerShape?: { input: string; output: string };
+  /**
+   * The input property naming the job a call is for (`{ key, version }`, D-173). The "may" step then also needs the
+   * permission capability.<capability key>.job.<job key>, so AI can be allowed per job (D-174).
+   */
+  job?: string;
 }
 
 /**

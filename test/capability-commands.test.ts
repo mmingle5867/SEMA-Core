@@ -127,4 +127,37 @@ const handed = (await asking).work!;
 assert.equal(handed.commandId, result.commandId, 'the waiting copy got the new work');
 assert.ok((await records.getInstance(b.id))!.lastCheckInAt >= askedAt, 'asking for work counts as checking in');
 
+// ---- A general capability: callers say what shape they want back, and name the job (D-172 to D-174) ----
+const general = { capabilityKey: 'neo.test.generate', version: '1.0.0', displayName: 'Generate', choosing: ['bound', 'consensus'], operations: [{
+  key: 'generate', required: true, job: 'job', answerShape: { input: 'answerShape', output: 'answer' },
+  input: { type: 'object', required: ['job', 'answerShape', 'prompt'], properties: { job: { type: 'object', required: ['key', 'version'], properties: { key: { type: 'string' }, version: { type: 'string' } } }, answerShape: { type: 'object' }, prompt: { type: 'string' } } },
+  output: { type: 'object', required: ['answer'], properties: { answer: {} } },
+}] };
+await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...general, operations: [{ ...general.operations[0], answerShape: { input: 'shape', output: 'answer' } }] }), /answerShape.input must be a property of its input/);
+await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...general, operations: [{ ...general.operations[0], job: 'task' }] }), /job must name a property of its input/);
+const generalCapability = await host.registerCapabilityVersion(as('admin'), general);
+assert.deepEqual([generalCapability.operations[0].job, generalCapability.operations[0].answerShape], ['job', { input: 'answerShape', output: 'answer' }]);
+const writer = await host.registerServiceVersion(as('admin'), { serviceKey: 'neo.test.writer', version: '1.0.0', capabilityVersionId: generalCapability.id, displayName: 'Writer', operations: ['generate'], declarations });
+const writerCopy = await host.startServiceInstance(as('svc.a'), { installationId: (await host.installService(as('admin'), { serviceVersionId: writer.id })).id });
+const titleShape = { type: 'object', required: ['title'], properties: { title: { type: 'string', maxLength: 10 } }, additionalProperties: false };
+const ask = (job: string, answerShape: object) => host.runCapability(as('shop'), { capabilityKey: 'neo.test.generate', version: '1.0.0', operation: 'generate', way: 'bound', services: ['neo.test.writer'], input: { job: { key: job, version: '1.0' }, answerShape, prompt: 'Write a title' }, waitSeconds: 5 });
+grants.shop.add('capability.neo.test.generate');
+// The job needs its own permission: without capability.neo.test.generate.job.listing-copy, only "not allowed".
+await assert.rejects(() => ask('listing-copy', titleShape), /^CoreHostAuthorizationError: Not allowed$/);
+grants.shop.add('capability.neo.test.generate.job.listing-copy');
+await assert.rejects(() => ask('pricing', titleShape), /^CoreHostAuthorizationError: Not allowed$/, 'a job not granted stays refused');
+// A requested shape Core cannot check is refused on the way in.
+await assert.rejects(() => ask('listing-copy', { type: 'string', pattern: 'x' }), /requested answer shape cannot be checked: input.answerShape uses "pattern"/);
+// The answer must match the requested shape, not only the contract.
+const answerWith = async (answer: object) => {
+  const { work } = await host.takeServiceWork(as('svc.a'), { instanceId: writerCopy.id, waitSeconds: 3 });
+  await host.answerServiceWork(as('svc.a'), { instanceId: writerCopy.id, executionId: work!.executionId, answer: 'accept' });
+  return { work: work!, report: () => host.reportServiceWork(as('svc.a'), { instanceId: writerCopy.id, executionId: work!.executionId, status: 'SUCCESS', answer }) };
+};
+const pending = ask('listing-copy', titleShape);
+const offered = await answerWith({ answer: { title: 'Far too long a title', extra: 1 } });
+await assert.rejects(() => offered.report(), /The answer does not match neo.test.generate 1.0.0: answer.answer.title must be at most 10 characters; answer.answer.extra is not allowed/);
+await host.reportServiceWork(as('svc.a'), { instanceId: writerCopy.id, executionId: offered.work.executionId, status: 'SUCCESS', answer: { answer: { title: 'Blue mug' } } });
+assert.deepEqual((await pending).entries[0].answer, { answer: { title: 'Blue mug' } });
+
 console.log('Capability commands test passed.');
