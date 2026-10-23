@@ -225,7 +225,12 @@ export class CapabilityRegistry {
     return operations;
   }
 
+  /**
+   * The ways of choosing a contract permits (D-162). A contract that lists none can be published but not run by command:
+   * programs reach its services directly, as with Foundation Resource.
+   */
   private choosing(value: unknown): ChoosingWay[] {
+    if (value === undefined) return [];
     if (!Array.isArray(value) || !value.length || !value.every((way) => (CHOOSING_WAYS as readonly unknown[]).includes(way))) throw new CapabilityRecordError(`choosing must list the ways its services may be chosen: ${CHOOSING_WAYS.join(', ')}`);
     if (new Set(value).size !== value.length) throw new CapabilityRecordError('choosing must not repeat a way');
     return value as ChoosingWay[];

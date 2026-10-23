@@ -260,7 +260,7 @@ export class CapabilityWork {
   private async plan(capability: CapabilityVersion | undefined, capabilityKey: string, version: string, input: { operation: unknown; way: unknown; services?: unknown }) {
     if (!capability) throw new CapabilityRecordError(`${capabilityKey} ${version} is not registered on this Core`);
     if (capability.status !== 'ACTIVE') throw new CapabilityRecordError(`${capabilityKey} ${version} is not active`);
-    if (!capability.choosing.length) throw new CapabilityRecordError(`${capabilityKey} ${version} has no contract that permits running it by command`);
+    if (!capability.choosing.length) throw new CapabilityRecordError(`${capabilityKey} ${version} lists no ways of choosing its services, so it cannot be run by command: programs reach its services directly`);
     const operation = text(input.operation, 'operation', 60);
     if (!capability.operations.some((item) => item.key === operation)) throw new CapabilityRecordError(`${capabilityKey} ${version} has no operation ${operation}`);
     const way = input.way as ChoosingWay;
