@@ -30,7 +30,11 @@ assert.deepEqual(valueProblems({ type: 'string', maxLength: 2 }, '😀😀'), []
 
 // ---- A test capability and two services ----
 const echo = { capabilityKey: 'neo.test.echo', version: '1.0.0', displayName: 'Echo', choosing: ['bound', 'dynamic', 'consensus', 'policy'], operations: [{ key: 'echo', required: true, input: { type: 'object', required: ['text'], properties: { text: { type: 'string', maxLength: 100 } }, additionalProperties: false }, output: { type: 'object', required: ['text'], properties: { text: { type: 'string' }, by: { type: 'string' } } } }] };
-await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...echo, choosing: undefined }), /choosing must list the ways/);
+await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...echo, choosing: [] }), /choosing must list the ways/);
+await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...echo, choosing: ['sometimes'] }), /choosing must list the ways/);
+// A contract may list no ways at all: it is published, but cannot be run by command (programs reach its services directly).
+const direct = await host.registerCapabilityVersion(as('admin'), { ...echo, capabilityKey: 'neo.test.direct', choosing: undefined });
+assert.deepEqual(direct.choosing, []);
 await assert.rejects(() => host.registerCapabilityVersion(as('admin'), { ...echo, operations: [{ key: 'echo', required: true, input: { type: 'string', pattern: 'x' } }] }), /does not support/);
 const capability = await host.registerCapabilityVersion(as('admin'), echo);
 const declarations = { runsWhere: 'device', offline: true, systems: ['windows'] };
