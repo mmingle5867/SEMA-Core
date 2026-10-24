@@ -220,6 +220,23 @@ try {
   assert.equal(await work.addResult(commandResult), true);
   assert.equal(await work.addResult({ ...commandResult, id: 'res-3' }), false, 'one command, one result');
   assert.deepEqual(await work.getResult('cmd-1'), commandResult);
+  // Phase 3a: a deferred execution is not offered before its time; progress is kept; waiting work can be cancelled.
+  const soon = new Date(Date.now() + 60_000).toISOString(), now3 = new Date().toISOString();
+  await work.addExecution({ id: 'ex-3', commandId: 'cmd-3', serviceVersionId: 'svc-3', status: 'PENDING', createdAt: now3 });
+  assert.equal((await work.claim('svc-3', 'run-3', now3, t0))!.id, 'ex-3');
+  assert.equal(await work.change('ex-3', { status: 'WAITING', instanceId: 'run-3' }, { status: 'PENDING', deferred: { until: soon, reason: 'warming up' } }), true);
+  assert.deepEqual((await work.getExecution('ex-3'))!.deferred, { until: soon, reason: 'warming up' });
+  assert.equal(await work.claim('svc-3', 'run-3', new Date().toISOString(), t0), undefined, 'not offered before its time');
+  assert.equal((await work.claim('svc-3', 'run-3', new Date(Date.now() + 61_000).toISOString(), t0))!.id, 'ex-3', 'offered once its time has come');
+  assert.equal(await work.change('ex-3', { status: 'WAITING', instanceId: 'run-3' }, { status: 'RUNNING', startedAt: now3 }), true);
+  const progressed = { at: new Date().toISOString(), percent: 40, note: 'drafting' };
+  assert.equal(await work.change('ex-3', { status: 'RUNNING', instanceId: 'run-3' }, { progress: progressed }), true);
+  assert.deepEqual((await work.getExecution('ex-3'))!.progress, progressed);
+  assert.deepEqual((await work.getExecution('ex-3'))!.deferred, { until: soon, reason: 'warming up' }, 'a later change keeps what was there');
+  assert.deepEqual((await work.listRunning()).map((execution) => execution.id), ['ex-3']);
+  await work.addExecution({ id: 'ex-4', commandId: 'cmd-3', serviceVersionId: 'svc-4', status: 'PENDING', createdAt: now3 });
+  await work.cancelPending('cmd-3', new Date().toISOString());
+  assert.deepEqual((await work.listExecutions('cmd-3')).map((execution) => [execution.id, execution.status]), [['ex-3', 'RUNNING'], ['ex-4', 'CANCELLED']], 'only work still waiting is cancelled');
   console.log('PostgreSQL local nodes test passed.');
 } finally {
   await prisma.$disconnect();

@@ -3,6 +3,8 @@ import { openCoreClientSigning, type CoreClientSigning } from '../keys/client-si
 import type { StoredKey } from '../keys/machine-key.js';
 import type { JsonValue } from '../core/types.js';
 import { valueProblems } from '../capabilities/schema.js';
+// A type only: nothing from Core's database layer is loaded with the wrapper.
+import type { UnavailableReason } from '../capabilities/work.js';
 
 /**
  * The wrapper (C6, D-166): the small standard boundary every service runs in, so the service holds only its business
@@ -25,7 +27,11 @@ import { valueProblems } from '../capabilities/schema.js';
 export interface Work { executionId: string; commandId: string; capabilityKey: string; version: string; operation: string; input: JsonValue }
 export type HandlerResult = { answer: JsonValue; outcome?: Outcome } | { reference: string; outcome?: Outcome };
 export type Outcome = 'achieved' | 'partly' | 'not-achieved' | 'needs-review';
-export type Handler = (input: JsonValue, work: Work) => Promise<HandlerResult>;
+/** Says the service is still working, optionally how far along (0 to 100) and a short note (D-180). The wrapper also says so on its own every 30 s. */
+export type Progress = (percent?: number, note?: string) => void;
+export type Handler = (input: JsonValue, work: Work, progress: Progress) => Promise<HandlerResult>;
+/** What the service says when offered work: take it (true), decline with a reason, defer until a time and why, or unavailable with reasons. */
+export type Decision = true | string | { defer: { until: Date | string; reason: string } } | { unavailable: UnavailableReason[] };
 /** A capability contract as published (a SEMA-Capabilities definition file): only the parts the wrapper checks. */
 export interface Contract { capabilityKey: string; version: string; operations: Array<{ key: string; output?: { [key: string]: JsonValue }; answerShape?: { input: string; output: string } }> }
 
@@ -44,7 +50,9 @@ export interface ServiceWrapperOptions {
   /** One handler per operation the service offers. */
   operations: Record<string, Handler>;
   /** Optional: says whether to take a piece of work. Return true to accept, or a reason to decline ("not now"). */
-  accept?: (work: Work) => Promise<true | string> | true | string;
+  accept?: (work: Work) => Promise<Decision> | Decision;
+  /** How often the wrapper says a job is still working, in seconds (default 30, D-180). */
+  progressSeconds?: number;
   /** How many jobs at once (1 to 1000). */
   capacity?: number;
   /** How long Core may hold each request for work (up to 30 s; default 25). Stopping waits at most this long. */
@@ -152,14 +160,21 @@ export class ServiceWrapper {
   }
 
   private async handle(instanceId: string, work: Work) {
-    const decision = this.options.accept ? await this.options.accept(work) : true;
+    const answer = (body: Record<string, unknown>) => this.call('POST', '/v1/core/services/executions/answer', { instanceId, executionId: work.executionId, ...body });
     const handler = this.options.operations[work.operation];
-    const reason = decision !== true ? decision : !handler ? `this service has no handler for ${work.operation}` : undefined;
-    if (reason !== undefined) { await this.call('POST', '/v1/core/services/executions/answer', { instanceId, executionId: work.executionId, answer: 'decline', reason }); return; }
-    await this.call('POST', '/v1/core/services/executions/answer', { instanceId, executionId: work.executionId, answer: 'accept' });
+    const decision: Decision = !handler ? `this service has no handler for ${work.operation}` : this.options.accept ? await this.options.accept(work) : true;
+    if (typeof decision === 'string') { await answer({ answer: 'decline', reason: decision }); return; }
+    if (decision !== true && 'defer' in decision) { await answer({ answer: 'defer', until: new Date(decision.defer.until).toISOString(), reason: decision.defer.reason }); return; }
+    if (decision !== true) { await answer({ answer: 'unavailable', reasons: decision.unavailable }); return; }
+    await answer({ answer: 'accept' });
+    // While the handler runs, say every so often that the work is still going (D-180), with the latest progress given.
+    let latest: { percent?: number; note?: string } = {};
+    const tell = () => this.call('POST', '/v1/core/services/executions/progress', { instanceId, executionId: work.executionId, ...latest }).catch(() => undefined);
+    const ticker = setInterval(() => { void tell(); }, (this.options.progressSeconds ?? 30) * 1000);
+    const progress: Progress = (percent, note) => { latest = { ...(percent !== undefined ? { percent } : {}), ...(note !== undefined ? { note: note.slice(0, 200) } : {}) }; void tell(); };
     let report: Record<string, unknown>;
     try {
-      const result = await handler!(work.input, work);
+      const result = await handler!(work.input, work, progress).finally(() => clearInterval(ticker));
       if ('answer' in result) {
         const operation = this.options.contract.operations.find((item) => item.key === work.operation);
         const problems = operation?.output ? valueProblems(operation.output, result.answer, 'answer') : [];

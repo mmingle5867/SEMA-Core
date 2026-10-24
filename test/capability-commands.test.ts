@@ -13,7 +13,8 @@ const store = new InMemorySemaCoreHostStore();
 const core = new SemaCore(store, { installationId: '3', maxReservationSize: 25 });
 const records = new InMemoryCapabilityStore();
 const issue = async (typeCode: string, metadata: object) => (await core.issueIdentifier(typeCode, metadata as never)).id;
-const host = new SemaCoreHost(core, store, authorization, undefined, undefined, undefined, undefined, new CapabilityRegistry(records, issue, async () => '3'), new CapabilityWork(core, records, new InMemoryWorkStore(), issue));
+const work = new CapabilityWork(core, records, new InMemoryWorkStore(), issue);
+const host = new SemaCoreHost(core, store, authorization, undefined, undefined, undefined, undefined, new CapabilityRegistry(records, issue, async () => '3'), work);
 await host.initialize({ actorId: null });
 const as = (actorId: string) => ({ actorId });
 
@@ -130,6 +131,79 @@ result = await run({ way: 'bound', services: ['neo.test.echo-b'], waitSeconds: 0
 const handed = (await asking).work!;
 assert.equal(handed.commandId, result.commandId, 'the waiting copy got the new work');
 assert.ok((await records.getInstance(b.id))!.lastCheckInAt >= askedAt, 'asking for work counts as checking in');
+
+// ---- Phase 3a: defer, unavailable, still working, enough (D-178 to D-182) ----
+const take = async (actor: string, instanceId: string) => (await host.takeServiceWork(as(actor), { instanceId, waitSeconds: 2 })).work!;
+const finish = (actor: string, instanceId: string, executionId: string, text = 'hello') => host.reportServiceWork(as(actor), { instanceId, executionId, status: 'SUCCESS', answer: { text } });
+const accept = (actor: string, instanceId: string, executionId: string) => host.answerServiceWork(as(actor), { instanceId, executionId, answer: 'accept' });
+
+// Defer under one service only: not offered again before its time, then done.
+result = await run({ way: 'bound', services: ['neo.test.echo-a'], waitSeconds: 0 });
+let offer = await take('svc.a', a.id);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'defer', until: new Date(Date.now() - 1000).toISOString(), reason: 'later' }), /until must be a time after now and at most 24 hours ahead/);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'defer', until: new Date(Date.now() + 25 * 3600_000).toISOString(), reason: 'later' }), /at most 24 hours ahead/);
+await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'defer', until: new Date(Date.now() + 1500).toISOString(), reason: 'warming up' });
+assert.equal((await host.takeServiceWork(as('svc.a'), { instanceId: a.id, waitSeconds: 0 })).work, null, 'not offered again before its time');
+let state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 0 });
+assert.equal(state.entries[0].status, 'PENDING');
+assert.ok(state.entries[0].deferredUntil, 'the entry says until when');
+await new Promise((wait) => setTimeout(wait, 1600));
+offer = await take('svc.a', a.id);
+await accept('svc.a', a.id, offer.executionId); await finish('svc.a', a.id, offer.executionId);
+assert.equal((await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 })).entries[0].status, 'SUCCESS');
+
+// Defer under a list in order: the next service takes it meanwhile; once it answers, the deferred one is cancelled.
+result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], waitSeconds: 0 });
+offer = await take('svc.a', a.id);
+await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'defer', until: new Date(Date.now() + 60_000).toISOString(), reason: 'busy for a minute' });
+let offerB = await take('svc.b', b.id);
+await accept('svc.b', b.id, offerB.executionId); await finish('svc.b', b.id, offerB.executionId, 'from B');
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
+assert.deepEqual(state.entries.map((entry) => [entry.serviceKey, entry.status]), [['neo.test.echo-a', 'CANCELLED'], ['neo.test.echo-b', 'SUCCESS']]);
+assert.equal((await core.getCommand(result.commandId))!.status, 'SUCCESS');
+
+// Unavailable, with what is missing: the next service in the order takes it.
+result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], waitSeconds: 0 });
+offer = await take('svc.a', a.id);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'mood', lasting: 'temporary' }] }), /kind must be one of memory, disk/);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory' }] }), /temporary or permanent/);
+await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '2 GB' }] });
+offerB = await take('svc.b', b.id);
+await accept('svc.b', b.id, offerB.executionId); await finish('svc.b', b.id, offerB.executionId);
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
+assert.deepEqual(state.entries[0].notNow, { answer: 'unavailable', reason: 'memory: needs 8 GB, has 2 GB (temporary)', reasons: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '2 GB' }] });
+assert.equal(state.entries[1].status, 'SUCCESS');
+
+// Still working: the service says how far along it is; one that goes silent is marked failed, and its late answer refused.
+result = await run({ way: 'bound', services: ['neo.test.echo-a'], waitSeconds: 0 });
+offer = await take('svc.a', a.id);
+await accept('svc.a', a.id, offer.executionId);
+await host.progressServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, percent: 40, note: 'drafting' });
+await assert.rejects(() => host.progressServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, percent: 140 }), /percent must be a number from 0 to 100/);
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 0 });
+assert.deepEqual([state.entries[0].status, state.entries[0].progress?.percent, state.entries[0].progress?.note], ['RUNNING', 40, 'drafting']);
+assert.deepEqual(await work.markSilent(60_000), [], 'a job reported on recently is left alone');
+await new Promise((wait) => setTimeout(wait, 30));
+assert.deepEqual(await work.markSilent(10), [offer.executionId]);
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 0 });
+assert.deepEqual([state.entries[0].status, state.entries[0].error], ['FAILED', 'stopped reporting: no word from the service for 0 s']);
+assert.equal((await core.getCommand(result.commandId))!.status, 'FAILED');
+await assert.rejects(() => finish('svc.a', a.id, offer.executionId), /is not running on this instance/, 'a late answer is refused');
+
+// Enough: under all of them, the command is finished once that many have succeeded; the rest record theirs late.
+await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-a'], enough: 1 }), /enough applies only when all of them are asked/);
+await assert.rejects(() => run({ way: 'consensus', enough: 9 }), /enough is 9, but only 2 services can run now/);
+const pendingEnough = run({ way: 'consensus', enough: 1, waitSeconds: 5 });
+offer = await take('svc.a', a.id);
+await accept('svc.a', a.id, offer.executionId); await finish('svc.a', a.id, offer.executionId, 'first');
+result = await pendingEnough;
+assert.deepEqual(result.entries.map((entry) => entry.status).sort(), ['PENDING', 'SUCCESS'], 'answered as soon as one had succeeded');
+assert.equal((await core.getCommand(result.commandId))!.status, 'SUCCESS');
+offerB = await take('svc.b', b.id);
+await accept('svc.b', b.id, offerB.executionId); await finish('svc.b', b.id, offerB.executionId, 'late');
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
+assert.deepEqual(state.entries.map((entry) => entry.status), ['SUCCESS', 'SUCCESS'], 'the late one recorded its answer');
+assert.deepEqual(state.result!.entries.map((entry) => entry.status).sort(), ['PENDING', 'SUCCESS'], "the command's one result never changes");
 
 // ---- A general capability: callers say what shape they want back, and name the job (D-172 to D-174) ----
 const general = { capabilityKey: 'neo.test.generate', version: '1.0.0', displayName: 'Generate', choosing: ['bound', 'consensus'], operations: [{

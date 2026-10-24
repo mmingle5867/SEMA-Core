@@ -2,13 +2,14 @@ import { PrismaClient } from '@prisma/client';
 import type { CoreLifecycleStatus } from '../core/types.js';
 import type { CommandResult, NotNow, WorkAnswer, WorkExecution, WorkStore } from './work.js';
 
-type ExecutionRow = { id: string; commandId: string; providerId: string; status: CoreLifecycleStatus; startedAt: Date | null; completedAt: Date | null; context: { instanceId?: string; offeredAt?: string; notNow?: NotNow } | null; error: { message?: string } | null; createdAt: Date };
+type ExecutionRow = { id: string; commandId: string; providerId: string; status: CoreLifecycleStatus; startedAt: Date | null; completedAt: Date | null; context: { instanceId?: string; offeredAt?: string; notNow?: NotNow; deferred?: WorkExecution['deferred']; progress?: WorkExecution['progress'] } | null; error: { message?: string } | null; createdAt: Date };
 const iso = (value: Date) => new Date(value).toISOString();
 const toExecution = (row: ExecutionRow): WorkExecution => ({
   id: row.id, commandId: row.commandId, serviceVersionId: row.providerId, status: row.status,
   ...(row.context?.instanceId ? { instanceId: row.context.instanceId } : {}), ...(row.context?.offeredAt ? { offeredAt: row.context.offeredAt } : {}),
   ...(row.startedAt ? { startedAt: iso(row.startedAt) } : {}), ...(row.completedAt ? { completedAt: iso(row.completedAt) } : {}),
-  ...(row.context?.notNow ? { notNow: row.context.notNow } : {}), ...(row.error?.message ? { error: row.error.message } : {}),
+  ...(row.context?.notNow ? { notNow: row.context.notNow } : {}), ...(row.context?.deferred ? { deferred: row.context.deferred } : {}), ...(row.context?.progress ? { progress: row.context.progress } : {}),
+  ...(row.error?.message ? { error: row.error.message } : {}),
   createdAt: iso(row.createdAt),
 });
 const EXECUTION = `"id", "commandId", "providerId", "status", "startedAt", "completedAt", "context", "error", "createdAt"`;
@@ -39,23 +40,31 @@ export class PrismaWorkStore implements WorkStore {
       UPDATE "sema_core_executions" SET "status" = 'WAITING', "context" = COALESCE("context", '{}'::jsonb) || jsonb_build_object('instanceId', $2::text, 'offeredAt', $3::text)
       WHERE "id" = (
         SELECT "id" FROM "sema_core_executions"
-        WHERE "providerId" = $1 AND ("status" = 'PENDING' OR ("status" = 'WAITING' AND "context"->>'offeredAt' < $4))
+        WHERE "providerId" = $1 AND (("status" = 'PENDING' AND COALESCE("context"->'deferred'->>'until', '') <= $3) OR ("status" = 'WAITING' AND "context"->>'offeredAt' < $4))
         ORDER BY "createdAt", "id" LIMIT 1 FOR UPDATE SKIP LOCKED)
       RETURNING ${EXECUTION}`, serviceVersionId, instanceId, now, staleBefore);
     return rows[0] ? toExecution(rows[0]) : undefined;
   }
-  async change(id: string, expected: { status: CoreLifecycleStatus; instanceId: string }, change: Partial<Pick<WorkExecution, 'status' | 'startedAt' | 'completedAt' | 'notNow' | 'error'>>) {
+  async change(id: string, expected: { status: CoreLifecycleStatus; instanceId: string }, change: Partial<Pick<WorkExecution, 'status' | 'startedAt' | 'completedAt' | 'notNow' | 'error' | 'deferred' | 'progress'>>) {
+    // The answer, deferral and progress live in the context; each given one replaces what was there.
+    const patch = { ...(change.notNow ? { notNow: change.notNow } : {}), ...(change.deferred ? { deferred: change.deferred } : {}), ...(change.progress ? { progress: change.progress } : {}) };
     const changed = await this.prisma.$executeRawUnsafe(`
       UPDATE "sema_core_executions" SET
         "status" = COALESCE($4, "status"),
         "startedAt" = COALESCE($5::timestamp, "startedAt"),
         "completedAt" = COALESCE($6::timestamp, "completedAt"),
-        "context" = CASE WHEN $7::jsonb IS NULL THEN "context" ELSE COALESCE("context", '{}'::jsonb) || jsonb_build_object('notNow', $7::jsonb) END,
+        "context" = COALESCE("context", '{}'::jsonb) || $7::jsonb,
         "error" = COALESCE($8::jsonb, "error")
       WHERE "id" = $1 AND "status" = $2 AND "context"->>'instanceId' = $3`,
     id, expected.status, expected.instanceId, change.status ?? null, change.startedAt ?? null, change.completedAt ?? null,
-    change.notNow ? JSON.stringify(change.notNow) : null, change.error ? JSON.stringify({ message: change.error }) : null);
+    JSON.stringify(patch), change.error ? JSON.stringify({ message: change.error }) : null);
     return changed === 1;
+  }
+  async cancelPending(commandId: string, now: string) {
+    await this.prisma.$executeRaw`UPDATE "sema_core_executions" SET "status" = 'CANCELLED', "completedAt" = ${now}::timestamp WHERE "commandId" = ${commandId} AND "status" = 'PENDING'`;
+  }
+  async listRunning() {
+    return (await this.prisma.$queryRawUnsafe<ExecutionRow[]>(`SELECT ${EXECUTION} FROM "sema_core_executions" WHERE "status" = 'RUNNING' ORDER BY "createdAt"`)).map(toExecution);
   }
   async addAnswer(id: string, answer: WorkAnswer) {
     await this.prisma.$executeRaw`

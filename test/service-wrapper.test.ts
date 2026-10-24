@@ -33,15 +33,18 @@ for (const name of ['a', 'b']) {
 const run = (input: Record<string, unknown>) => host.runCapability(as('shop'), { capabilityKey: 'neo.test.echo', version: '1.0.0', operation: 'echo', waitSeconds: 10, ...input } as never);
 const logA: string[] = [], logB: string[] = [];
 let busy = false, inFlight = 0, most = 0;
+let mood: 'yes' | 'defer' | 'short' = 'yes';
+const progressSeen: string[] = [];
 
 // Service A echoes, slowly enough that two jobs overlap; it declines while "busy"; "boom" makes it throw; "wrong" makes
 // it answer outside the contract.
 const a = await ServiceWrapper.start({
   coreUrl, applicationKey: 'svc.a', secret: 'secret-a', key: await new MemoryKeyStore().open(), service: { serviceKey: 'neo.test.echo-a', version: '1.0.0' }, contract,
-  capacity: 2, workWaitSeconds: 1, retryMs: 100, log: (line) => logA.push(line),
-  accept: () => busy ? 'busy right now' : true,
+  capacity: 2, workWaitSeconds: 1, retryMs: 100, progressSeconds: 0.2, log: (line) => logA.push(line),
+  accept: () => busy ? 'busy right now' : mood === 'defer' ? { defer: { until: new Date(Date.now() + 60_000), reason: 'warming up' } } : mood === 'short' ? { unavailable: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '1 GB' }] } : true,
   operations: {
-    echo: async (input): Promise<HandlerResult> => {
+    echo: async (input, _work, progress): Promise<HandlerResult> => {
+      if ((input as { text: string }).text === 'slow') { progress(10, 'starting'); await new Promise((wait) => setTimeout(wait, 700)); progressSeen.push('done'); return { answer: { text: 'A: slow' } }; }
       inFlight += 1; most = Math.max(most, inFlight);
       await new Promise((wait) => setTimeout(wait, 150));
       inFlight -= 1;
@@ -72,6 +75,21 @@ try {
   result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], input: { text: 'hi' } });
   assert.deepEqual(result.entries.map((entry) => [entry.serviceKey, entry.status, entry.notNow?.reason ?? entry.answer]), [['neo.test.echo-a', 'FAILED', 'busy right now'], ['neo.test.echo-b', 'SUCCESS', { text: 'B: hi' }]]);
   busy = false;
+  // Defer and unavailable through the wrapper: under a list in order, B takes the work meanwhile (D-178, D-179).
+  mood = 'defer';
+  result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], input: { text: 'hi' } });
+  assert.deepEqual(result.entries.map((entry) => [entry.serviceKey, entry.status]), [['neo.test.echo-a', 'CANCELLED'], ['neo.test.echo-b', 'SUCCESS']]);
+  mood = 'short';
+  result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], input: { text: 'hi' } });
+  assert.equal(result.entries[0].notNow?.reason, 'memory: needs 8 GB, has 1 GB (temporary)');
+  mood = 'yes';
+  // While a slow job runs the wrapper says it is still working, with the latest progress the handler gave (D-180).
+  const slow = run({ way: 'bound', services: ['neo.test.echo-a'], input: { text: 'slow' }, waitSeconds: 0 });
+  const slowCommand = (await slow).commandId;
+  let seenProgress: unknown;
+  for (let tries = 0; !seenProgress && tries < 40; tries++) { seenProgress = (await host.waitOnCapabilityCommand(as('shop'), { commandId: slowCommand, waitSeconds: 0 })).entries[0].progress; if (!seenProgress) await new Promise((wait) => setTimeout(wait, 50)); }
+  assert.deepEqual([(seenProgress as { percent: number }).percent, (seenProgress as { note: string }).note], [10, 'starting']);
+  assert.equal((await host.waitOnCapabilityCommand(as('shop'), { commandId: slowCommand, waitSeconds: 5 })).entries[0].status, 'SUCCESS');
   result = await run({ way: 'consensus', input: { text: 'hi' } });
   assert.deepEqual(result.entries.map((entry) => (entry.answer as { text: string }).text).sort(), ['A: hi', 'B: hi']);
 
