@@ -32,9 +32,29 @@ export const LIMITS = {
   maxDeferSeconds: 24 * 60 * 60,
 };
 
-/** Why a service cannot run now (CL-8, D-158, D-179): what is missing, what is needed and what is there, and whether it passes. */
+/** Why a service cannot run now (CL-8, D-158, D-179, D-185): what is missing, and whether it passes or not. */
 export const UNAVAILABLE_KINDS = ['memory', 'disk', 'processor', 'graphics', 'network', 'busy', 'setting', 'suspended', 'other'] as const;
-export type UnavailableReason = { kind: typeof UNAVAILABLE_KINDS[number]; lasting: 'temporary' | 'permanent'; needed?: string; available?: string; note?: string };
+/**
+ * The kinds a machine has a measurable amount of: memory, disk and graphics-card memory in megabytes, processor in cores.
+ * For these the service gives what it needs, what is free now and what the machine has in all, and Core decides whether
+ * it is temporary or permanent (D-185): needing more than the machine has in all is permanent (this machine can never
+ * run it, so it is never retried here); having enough in all but not free now is temporary (other work is using it).
+ */
+export const MEASURED_KINDS = ['memory', 'disk', 'processor', 'graphics'] as const;
+export const MEASURE_UNITS: Record<typeof MEASURED_KINDS[number], string> = { memory: 'MB', disk: 'MB', processor: 'cores', graphics: 'MB' };
+export type UnavailableReason = { kind: typeof UNAVAILABLE_KINDS[number]; lasting: 'temporary' | 'permanent'; needed?: number; free?: number; total?: number; note?: string };
+const isMeasured = (kind: string): kind is typeof MEASURED_KINDS[number] => (MEASURED_KINDS as readonly string[]).includes(kind);
+
+/** A reason in plain words, such as "memory: needs 8192 MB, this machine has 4096 MB in all (permanent)". */
+export function describeReason(reason: UnavailableReason) {
+  if (isMeasured(reason.kind) && reason.needed !== undefined && reason.total !== undefined) {
+    const unit = MEASURE_UNITS[reason.kind];
+    return reason.lasting === 'permanent'
+      ? `${reason.kind}: needs ${reason.needed} ${unit}, this machine has ${reason.total} ${unit} in all (permanent)`
+      : `${reason.kind}: needs ${reason.needed} ${unit}, ${reason.free ?? 0} ${unit} of ${reason.total} ${unit} free, the rest in use (temporary)`;
+  }
+  return `${reason.kind}${reason.note ? `: ${reason.note}` : ''} (${reason.lasting})`;
+}
 export type NotNow = { answer: 'decline' | 'unavailable'; reason: string; reasons?: UnavailableReason[] };
 export interface WorkExecution {
   id: string;
@@ -254,7 +274,7 @@ export class CapabilityWork {
       changed = await this.store.change(executionId, expected, { status: 'PENDING', deferred: { until: new Date(until).toISOString(), reason: text(input.reason, 'reason', 500) } });
     } else if (input.answer === 'unavailable') {
       const reasons = this.reasons(input.reasons);
-      const reason = input.reason === undefined ? reasons.map((item) => `${item.kind}${item.needed ? `: needs ${item.needed}` : ''}${item.available ? `, has ${item.available}` : ''} (${item.lasting})`).join('; ') : text(input.reason, 'reason', 500);
+      const reason = input.reason === undefined ? reasons.map(describeReason).join('; ') : text(input.reason, 'reason', 500);
       changed = await this.store.change(executionId, expected, { status: 'FAILED', completedAt: now.toISOString(), notNow: { answer: 'unavailable', reason, reasons } });
     } else throw new CapabilityRecordError('answer must be accept, decline, defer or unavailable');
     if (!changed) throw new CapabilityRecordError(`Execution ${executionId} is not waiting for this instance's answer; it may have been offered to another after ${LIMITS.offerSeconds} s`);
@@ -296,12 +316,26 @@ export class CapabilityWork {
   }
 
   private reasons(value: unknown): UnavailableReason[] {
-    if (!Array.isArray(value) || !value.length || value.length > 20) throw new CapabilityRecordError('reasons must list 1 to 20 reasons, each { kind, lasting, needed?, available?, note? }');
+    if (!Array.isArray(value) || !value.length || value.length > 20) throw new CapabilityRecordError('reasons must list 1 to 20 reasons, each { kind, and needed, free and total for memory, disk, processor or graphics, or else lasting; note? }');
+    const amount = (value: unknown, name: string) => {
+      if (value === undefined) return undefined;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new CapabilityRecordError(`${name} must be a number, 0 or more`);
+      return value;
+    };
     return value.map((item) => {
       const reason = item as Record<string, unknown>;
       if (!reason || typeof reason !== 'object' || !(UNAVAILABLE_KINDS as readonly unknown[]).includes(reason.kind)) throw new CapabilityRecordError(`Each reason's kind must be one of ${UNAVAILABLE_KINDS.join(', ')}`);
-      if (reason.lasting !== 'temporary' && reason.lasting !== 'permanent') throw new CapabilityRecordError('Each reason says whether it is temporary or permanent (lasting)');
-      return { kind: reason.kind as UnavailableReason['kind'], lasting: reason.lasting, ...(reason.needed !== undefined ? { needed: text(reason.needed, 'needed', 100) } : {}), ...(reason.available !== undefined ? { available: text(reason.available, 'available', 100) } : {}), ...(reason.note !== undefined ? { note: text(reason.note, 'note', 200) } : {}) };
+      const kind = reason.kind as UnavailableReason['kind'];
+      const note = reason.note !== undefined ? { note: text(reason.note, 'note', 200) } : {};
+      const needed = amount(reason.needed, 'needed'), free = amount(reason.free, 'free'), total = amount(reason.total, 'total');
+      // Measured: Core decides from the numbers, whatever the service said (D-185).
+      if (isMeasured(kind) && needed !== undefined && total !== undefined) {
+        if (free !== undefined && free > total) throw new CapabilityRecordError(`${kind}: free cannot be more than total`);
+        return { kind, lasting: needed > total ? 'permanent' as const : 'temporary' as const, needed, ...(free !== undefined ? { free } : {}), total, ...note };
+      }
+      if (isMeasured(kind) && (needed !== undefined || free !== undefined || total !== undefined)) throw new CapabilityRecordError(`${kind}: give needed and total (and free), in ${MEASURE_UNITS[kind]}, so Core can tell temporary from permanent`);
+      if (reason.lasting !== 'temporary' && reason.lasting !== 'permanent') throw new CapabilityRecordError(`${kind}: say whether it is temporary or permanent (lasting)${isMeasured(kind) ? `, or give needed, free and total in ${MEASURE_UNITS[kind]}` : ''}`);
+      return { kind, lasting: reason.lasting, ...note };
     });
   }
 
