@@ -166,13 +166,24 @@ assert.equal((await core.getCommand(result.commandId))!.status, 'SUCCESS');
 result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], waitSeconds: 0 });
 offer = await take('svc.a', a.id);
 await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'mood', lasting: 'temporary' }] }), /kind must be one of memory, disk/);
-await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory' }] }), /temporary or permanent/);
-await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '2 GB' }] });
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'network' }] }), /network: say whether it is temporary or permanent/);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', needed: 8192 }] }), /give needed and total/);
+await assert.rejects(() => host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', needed: 8192, free: 9000, total: 4096 }] }), /free cannot be more than total/);
+// Enough memory in all but in use now: temporary, even if the service called it permanent (D-185).
+await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', lasting: 'permanent', needed: 8192, free: 2048, total: 16384 }] });
 offerB = await take('svc.b', b.id);
 await accept('svc.b', b.id, offerB.executionId); await finish('svc.b', b.id, offerB.executionId);
 state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
-assert.deepEqual(state.entries[0].notNow, { answer: 'unavailable', reason: 'memory: needs 8 GB, has 2 GB (temporary)', reasons: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '2 GB' }] });
+assert.deepEqual(state.entries[0].notNow, { answer: 'unavailable', reason: 'memory: needs 8192 MB, 2048 MB of 16384 MB free, the rest in use (temporary)', reasons: [{ kind: 'memory', lasting: 'temporary', needed: 8192, free: 2048, total: 16384 }] });
 assert.equal(state.entries[1].status, 'SUCCESS');
+// Needing more than the machine has in all: permanent, even if the service called it temporary; this machine can never run it.
+result = await run({ way: 'bound', services: ['neo.test.echo-a'], waitSeconds: 0 });
+offer = await take('svc.a', a.id);
+await host.answerServiceWork(as('svc.a'), { instanceId: a.id, executionId: offer.executionId, answer: 'unavailable', reasons: [{ kind: 'memory', lasting: 'temporary', needed: 8192, free: 1024, total: 4096 }, { kind: 'network', lasting: 'temporary', note: 'no internet' }] });
+state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
+assert.deepEqual(state.entries[0].notNow!.reasons!.map((reason) => reason.lasting), ['permanent', 'temporary']);
+assert.equal(state.entries[0].notNow!.reason, 'memory: needs 8192 MB, this machine has 4096 MB in all (permanent); network: no internet (temporary)');
+assert.equal((await core.getCommand(result.commandId))!.status, 'FAILED', 'one service only: nothing else is tried');
 
 // Still working: the service says how far along it is; one that goes silent is marked failed, and its late answer refused.
 result = await run({ way: 'bound', services: ['neo.test.echo-a'], waitSeconds: 0 });

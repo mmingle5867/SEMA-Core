@@ -41,7 +41,7 @@ const progressSeen: string[] = [];
 const a = await ServiceWrapper.start({
   coreUrl, applicationKey: 'svc.a', secret: 'secret-a', key: await new MemoryKeyStore().open(), service: { serviceKey: 'neo.test.echo-a', version: '1.0.0' }, contract,
   capacity: 2, workWaitSeconds: 1, retryMs: 100, progressSeconds: 0.2, log: (line) => logA.push(line),
-  accept: () => busy ? 'busy right now' : mood === 'defer' ? { defer: { until: new Date(Date.now() + 60_000), reason: 'warming up' } } : mood === 'short' ? { unavailable: [{ kind: 'memory', lasting: 'temporary', needed: '8 GB', available: '1 GB' }] } : true,
+  accept: () => busy ? 'busy right now' : mood === 'defer' ? { defer: { until: new Date(Date.now() + 60_000), reason: 'warming up' } } : mood === 'short' ? { unavailable: [{ kind: 'memory', lasting: 'temporary', needed: 8192, free: 1024, total: 16384 }] } : true,
   operations: {
     echo: async (input, _work, progress): Promise<HandlerResult> => {
       if ((input as { text: string }).text === 'slow') { progress(10, 'starting'); await new Promise((wait) => setTimeout(wait, 700)); progressSeen.push('done'); return { answer: { text: 'A: slow' } }; }
@@ -81,7 +81,7 @@ try {
   assert.deepEqual(result.entries.map((entry) => [entry.serviceKey, entry.status]), [['neo.test.echo-a', 'CANCELLED'], ['neo.test.echo-b', 'SUCCESS']]);
   mood = 'short';
   result = await run({ way: 'dynamic', services: ['neo.test.echo-a', 'neo.test.echo-b'], input: { text: 'hi' } });
-  assert.equal(result.entries[0].notNow?.reason, 'memory: needs 8 GB, has 1 GB (temporary)');
+  assert.equal(result.entries[0].notNow?.reason, 'memory: needs 8192 MB, 1024 MB of 16384 MB free, the rest in use (temporary)');
   mood = 'yes';
   // While a slow job runs the wrapper says it is still working, with the latest progress the handler gave (D-180).
   const slow = run({ way: 'bound', services: ['neo.test.echo-a'], input: { text: 'slow' }, waitSeconds: 0 });
