@@ -84,5 +84,7 @@ host.startCheckIns(Number.isFinite(checkInSeconds) ? checkInSeconds * 1000 : 300
 // A service's running copy that has not checked in for this many minutes is marked lost (it was ended without saying
 // so). Checked every minute. 0 turns it off.
 const lostMinutes = Number(process.env.SEMA_CORE_INSTANCE_LOST_MINUTES ?? 10);
-host.startInstanceSweep(60_000, Number.isFinite(lostMinutes) ? lostMinutes * 60_000 : 600_000);
+// A job whose service has not said it is still working for this many seconds is marked failed (D-180). 0 turns it off.
+const silentSeconds = Number(process.env.SEMA_CORE_EXECUTION_SILENT_SECONDS ?? 90);
+host.startInstanceSweep(15_000, Number.isFinite(lostMinutes) ? lostMinutes * 60_000 : 600_000, Number.isFinite(silentSeconds) && silentSeconds > 0 ? silentSeconds * 1000 : Number.MAX_SAFE_INTEGER);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));

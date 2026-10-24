@@ -228,6 +228,11 @@ export class SemaCoreHost {
     await this.requireAdministration(context, 'core.services.run');
     return this.work((work) => work.answer(context.actorId, input ?? {} as never));
   }
+  /** A running copy says it is still working on a job (D-180). */
+  async progressServiceWork(context: CoreHostRequestContext, input: Parameters<CapabilityWork['progress']>[1]) {
+    await this.requireAdministration(context, 'core.services.run', true);
+    return this.work((work) => work.progress(context.actorId, input ?? {} as never));
+  }
   async reportServiceWork(context: CoreHostRequestContext, input: Parameters<CapabilityWork['report']>[1]) {
     await this.requireAdministration(context, 'core.services.run', true);
     return this.work((work) => work.report(context.actorId, input ?? {} as never));
@@ -347,7 +352,8 @@ export class SemaCoreHost {
         { method: 'POST', path: '/v1/core/capability-commands', purpose: 'Run an operation of a capability: the way of choosing its services, the services, the input and how long to wait (up to 60 s). Needs capability.<key>; otherwise "not allowed".' },
         { method: 'POST', path: '/v1/core/capability-commands/wait', purpose: 'Wait again on a command this program issued: what each of its executions has done so far.' },
         { method: 'POST', path: '/v1/core/services/instances/work', purpose: 'A running copy asks for work and is held up to 30 s until there is some. Counts as checking in.' },
-        { method: 'POST', path: '/v1/core/services/executions/answer', purpose: 'A running copy accepts the work it was offered, or declines it with a reason.' },
+        { method: 'POST', path: '/v1/core/services/executions/answer', purpose: 'A running copy answers the work it was offered: accept; decline with a reason; defer until a time (at most a day) and why; or unavailable with its reasons.' },
+        { method: 'POST', path: '/v1/core/services/executions/progress', purpose: 'A running copy says it is still working on a job, optionally how far along; a job not reported on for 90 s is marked failed.' },
         { method: 'POST', path: '/v1/core/services/executions/report', purpose: 'A running copy reports its result: an answer up to 64 KB, or a reference to where it stored a larger one; or that it failed.' },
       ],
       settings: [
@@ -795,11 +801,14 @@ export class SemaCoreHost {
    * Running copies that stop checking in are marked lost after `lostAfterMs`, checked every `intervalMs` (and once now).
    * Each round that marks any is audited, naming them and why. The timer never keeps the process alive.
    */
-  startInstanceSweep(intervalMs: number, lostAfterMs: number) {
+  startInstanceSweep(intervalMs: number, lostAfterMs: number, silentAfterMs?: number) {
     if (!this.capabilityRecords || !(intervalMs > 0) || !(lostAfterMs > 0)) return undefined;
     const sweep = async () => {
       const lost = await this.capabilityRecords!.markLost(lostAfterMs);
       if (lost.length) await this.core.recordAudit({ action: 'core.services.instances-lost', actorId: null, subjectIds: lost, evidence: { reason: `no check-in for ${Math.round(lostAfterMs / 60_000)} minutes` } });
+      // Jobs whose service stopped saying it is still working are marked failed (D-180).
+      const silent = this.capabilityWork ? await this.capabilityWork.markSilent(silentAfterMs) : [];
+      if (silent.length) await this.core.recordAudit({ action: 'capability.executions.silent', actorId: null, subjectIds: silent, evidence: { reason: 'stopped reporting' } });
     };
     sweep().catch(() => undefined);
     const timer = setInterval(() => { sweep().catch(() => undefined); }, intervalMs);

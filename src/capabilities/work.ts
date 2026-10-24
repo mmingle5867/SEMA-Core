@@ -24,9 +24,18 @@ export const LIMITS = {
   liveSeconds: 150,
   /** The largest answer carried inline; anything larger goes by reference (D-164). */
   inlineBytes: 64 * 1024,
+  /** A service doing a job says it is still working this often (D-180). */
+  progressSeconds: 30,
+  /** A running execution not reported on for this long is marked failed: "stopped reporting" (three intervals, D-180). */
+  silentSeconds: 90,
+  /** The furthest ahead a service may defer work (D-178). */
+  maxDeferSeconds: 24 * 60 * 60,
 };
 
-export type NotNow = { answer: 'decline' | 'unavailable'; reason: string };
+/** Why a service cannot run now (CL-8, D-158, D-179): what is missing, what is needed and what is there, and whether it passes. */
+export const UNAVAILABLE_KINDS = ['memory', 'disk', 'processor', 'graphics', 'network', 'busy', 'setting', 'suspended', 'other'] as const;
+export type UnavailableReason = { kind: typeof UNAVAILABLE_KINDS[number]; lasting: 'temporary' | 'permanent'; needed?: string; available?: string; note?: string };
+export type NotNow = { answer: 'decline' | 'unavailable'; reason: string; reasons?: UnavailableReason[] };
 export interface WorkExecution {
   id: string;
   commandId: string;
@@ -38,6 +47,10 @@ export interface WorkExecution {
   startedAt?: string;
   completedAt?: string;
   notNow?: NotNow;
+  /** The service deferred the work: it is not offered again before `until` (D-178). */
+  deferred?: { until: string; reason: string };
+  /** The service's last report that it is still working (D-180). */
+  progress?: { at: string; percent?: number; note?: string };
   error?: string;
   createdAt: string;
 }
@@ -52,6 +65,8 @@ export interface ResultEntry {
   answer?: JsonValue;
   reference?: string;
   notNow?: NotNow;
+  deferredUntil?: string;
+  progress?: WorkExecution['progress'];
   error?: string;
 }
 export interface CommandResult { id: string; commandId: string; entries: ResultEntry[]; recordedAt: string }
@@ -63,7 +78,11 @@ export interface WorkStore {
   /** Offers the oldest waiting execution for the service version to the instance, atomically: PENDING, or offered before `staleBefore` and never answered. */
   claim(serviceVersionId: string, instanceId: string, now: string, staleBefore: string): Promise<WorkExecution | undefined>;
   /** Changes an execution only when it is still in the expected state and offered to the expected instance. Says whether it changed. */
-  change(id: string, expected: { status: CoreLifecycleStatus; instanceId: string }, change: Partial<Pick<WorkExecution, 'status' | 'startedAt' | 'completedAt' | 'notNow' | 'error'>>): Promise<boolean>;
+  change(id: string, expected: { status: CoreLifecycleStatus; instanceId: string }, change: Partial<Pick<WorkExecution, 'status' | 'startedAt' | 'completedAt' | 'notNow' | 'error' | 'deferred' | 'progress'>>): Promise<boolean>;
+  /** Cancels a command's executions that are still waiting to be offered (deferred ones, when another service has answered). */
+  cancelPending(commandId: string, now: string): Promise<void>;
+  /** Every execution being worked on, for the check on still-working reports. */
+  listRunning(): Promise<WorkExecution[]>;
   addAnswer(id: string, answer: WorkAnswer): Promise<void>;
   getAnswer(executionId: string): Promise<WorkAnswer | undefined>;
   /** Records the command's one result; refused (false) when it already has one. */
@@ -82,7 +101,7 @@ export class InMemoryWorkStore implements WorkStore {
   async getExecution(id: string) { const found = this.executions.get(id); return found && copy(found); }
   async listExecutions(commandId: string) { return [...this.executions.values()].filter((item) => item.commandId === commandId).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map(copy); }
   async claim(serviceVersionId: string, instanceId: string, now: string, staleBefore: string) {
-    const next = [...this.executions.values()].filter((item) => item.serviceVersionId === serviceVersionId && (item.status === 'PENDING' || (item.status === 'WAITING' && item.offeredAt! < staleBefore))).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+    const next = [...this.executions.values()].filter((item) => item.serviceVersionId === serviceVersionId && ((item.status === 'PENDING' && !(item.deferred && item.deferred.until > now)) || (item.status === 'WAITING' && item.offeredAt! < staleBefore))).sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (!next) return undefined;
     Object.assign(next, { status: 'WAITING', instanceId, offeredAt: now });
     return copy(next);
@@ -93,6 +112,8 @@ export class InMemoryWorkStore implements WorkStore {
     Object.assign(found, copy(change));
     return true;
   }
+  async cancelPending(commandId: string, now: string) { for (const item of this.executions.values()) if (item.commandId === commandId && item.status === 'PENDING') Object.assign(item, { status: 'CANCELLED', completedAt: now }); }
+  async listRunning() { return [...this.executions.values()].filter((item) => item.status === 'RUNNING').map(copy); }
   async addAnswer(_id: string, answer: WorkAnswer) { this.answers.set(answer.executionId, copy(answer)); }
   async getAnswer(executionId: string) { const found = this.answers.get(executionId); return found && copy(found); }
   async addResult(result: CommandResult) { if (this.results.has(result.commandId)) return false; this.results.set(result.commandId, copy(result)); return true; }
@@ -102,7 +123,7 @@ export class InMemoryWorkStore implements WorkStore {
 /** A refusal at the "may" step. It says only "not allowed" (D-150, D-163). */
 export class NotAllowedError extends Error { constructor() { super('Not allowed'); this.name = 'NotAllowedError'; } }
 
-type Payload = { capabilityVersionId: string; capabilityKey: string; version: string; operation: string; way: ChoosingWay; services: string[]; input: JsonValue };
+type Payload = { capabilityVersionId: string; capabilityKey: string; version: string; operation: string; way: ChoosingWay; services: string[]; input: JsonValue; enough?: number };
 const text = (value: unknown, name: string, max = 200) => {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new CapabilityRecordError(`${name} must be a non-empty string of at most ${max} characters`);
   return value.trim();
@@ -126,7 +147,7 @@ export class CapabilityWork {
    * Runs an operation of a capability. `mayUse` asks Foundation Access whether the caller may use the capability; when it
    * says no, the caller is told only "not allowed", never which services exist or why they could not run.
    */
-  async run(caller: string | null, input: { capabilityKey: unknown; version: unknown; operation: unknown; way: unknown; services?: unknown; input?: unknown; waitSeconds?: unknown; workspaceId?: unknown }, mayUse: (capabilityKey: string) => Promise<boolean>) {
+  async run(caller: string | null, input: { capabilityKey: unknown; version: unknown; operation: unknown; way: unknown; services?: unknown; input?: unknown; waitSeconds?: unknown; workspaceId?: unknown; enough?: unknown }, mayUse: (capabilityKey: string) => Promise<boolean>) {
     if (!caller) throw new CapabilityRecordError('Only a program that has proved who it is may issue a command');
     if ((await this.records.listInstances()).some((instance) => instance.applicationKey === caller)) throw new CapabilityRecordError('A service never issues a command: this program key runs a service (D-160)');
     const capabilityKey = text(input.capabilityKey, 'capabilityKey', 120), version = text(input.version, 'version', 40);
@@ -165,12 +186,20 @@ export class CapabilityWork {
       const problems = schemaProblems(shape, `input.${operation.answerShape.input}`);
       if (problems.length) throw new CapabilityRecordError(`The requested answer shape cannot be checked: ${problems.slice(0, 5).join('; ')}`);
     }
+    // Enough (D-182): under all of them, how many answers finish the command; the rest record theirs late.
+    let enough: number | undefined;
+    if (input.enough !== undefined) {
+      if (plan.way !== 'consensus') throw new CapabilityRecordError('enough applies only when all of them are asked (consensus)');
+      if (!Number.isSafeInteger(input.enough) || (input.enough as number) < 1) throw new CapabilityRecordError('enough must be a whole number, 1 or more');
+      if ((input.enough as number) > chosen.length) throw new CapabilityRecordError(`enough is ${String(input.enough)}, but only ${chosen.length} service${chosen.length === 1 ? '' : 's'} can run now. ${plan.reasons.join('. ')}`.trim());
+      enough = input.enough as number;
+    }
     // Execute: one execution per chosen service. Under dynamic, the rest wait in order in case the first declines.
-    const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: (plan.way === 'consensus' ? chosen : plan.requested).map((service) => service.id), input: body };
+    const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: (plan.way === 'consensus' ? chosen : plan.requested).map((service) => service.id), input: body, ...(enough ? { enough } : {}) };
     const command = await this.core.createCommand({ commandType: 'capability.run', actorId: caller, workspaceId: typeof input.workspaceId === 'string' ? input.workspaceId : null, subjectIds: [plan.capability.id], payload: payload as unknown as JsonObject });
     for (const service of chosen) await this.addExecution(command.id, service.id);
     await this.core.updateCommandStatus({ commandId: command.id, status: 'RUNNING' });
-    await this.core.recordAudit({ action: 'capability.command.run', actorId: caller, commandId: command.id, subjectIds: [plan.capability.id, ...chosen.map((service) => service.id)], evidence: { operation: plan.operation, way: plan.way } });
+    await this.core.recordAudit({ action: 'capability.command.run', actorId: caller, commandId: command.id, subjectIds: [plan.capability.id, ...chosen.map((service) => service.id)], evidence: { operation: plan.operation, way: plan.way, ...(enough ? { enough } : {}) } });
     await this.waitUntilFinished(command.id, waitSeconds);
     const entries = await this.entries(command.id);
     const result: CommandResult = { id: await this.issue('RESULT', { commandId: command.id }), commandId: command.id, entries, recordedAt: new Date().toISOString() };
@@ -206,20 +235,74 @@ export class CapabilityWork {
     }
   }
 
-  /** The instance answers the work it was offered: accept, or decline with a reason ("not now"). */
-  async answer(caller: string | null, input: { instanceId: unknown; executionId: unknown; answer: unknown; reason?: unknown }) {
+  /**
+   * The instance answers the work it was offered (N3): accept; decline with a reason; defer, saying until when (at most a
+   * day) and why (D-178); or unavailable, with the reasons (D-179). Decline, defer and unavailable are "not now": under a
+   * list in order the next service is tried meanwhile; a deferred execution is offered again once its time has come.
+   */
+  async answer(caller: string | null, input: { instanceId: unknown; executionId: unknown; answer: unknown; reason?: unknown; until?: unknown; reasons?: unknown }) {
     const { instance } = await this.ownInstance(caller, input.instanceId);
     const executionId = text(input.executionId, 'executionId');
-    if (input.answer !== 'accept' && input.answer !== 'decline') throw new CapabilityRecordError('answer must be accept or decline');
-    const now = new Date().toISOString();
-    const changed = input.answer === 'accept'
-      ? await this.store.change(executionId, { status: 'WAITING', instanceId: instance.id }, { status: 'RUNNING', startedAt: now })
-      : await this.store.change(executionId, { status: 'WAITING', instanceId: instance.id }, { status: 'FAILED', completedAt: now, notNow: { answer: 'decline', reason: text(input.reason, 'reason', 500) } });
+    const expected = { status: 'WAITING' as const, instanceId: instance.id };
+    const now = new Date();
+    let changed: boolean;
+    if (input.answer === 'accept') changed = await this.store.change(executionId, expected, { status: 'RUNNING', startedAt: now.toISOString() });
+    else if (input.answer === 'decline') changed = await this.store.change(executionId, expected, { status: 'FAILED', completedAt: now.toISOString(), notNow: { answer: 'decline', reason: text(input.reason, 'reason', 500) } });
+    else if (input.answer === 'defer') {
+      const until = typeof input.until === 'string' ? Date.parse(input.until) : NaN;
+      if (!Number.isFinite(until) || until <= now.getTime() || until > now.getTime() + LIMITS.maxDeferSeconds * 1000) throw new CapabilityRecordError(`until must be a time after now and at most ${LIMITS.maxDeferSeconds / 3600} hours ahead`);
+      changed = await this.store.change(executionId, expected, { status: 'PENDING', deferred: { until: new Date(until).toISOString(), reason: text(input.reason, 'reason', 500) } });
+    } else if (input.answer === 'unavailable') {
+      const reasons = this.reasons(input.reasons);
+      const reason = input.reason === undefined ? reasons.map((item) => `${item.kind}${item.needed ? `: needs ${item.needed}` : ''}${item.available ? `, has ${item.available}` : ''} (${item.lasting})`).join('; ') : text(input.reason, 'reason', 500);
+      changed = await this.store.change(executionId, expected, { status: 'FAILED', completedAt: now.toISOString(), notNow: { answer: 'unavailable', reason, reasons } });
+    } else throw new CapabilityRecordError('answer must be accept, decline, defer or unavailable');
     if (!changed) throw new CapabilityRecordError(`Execution ${executionId} is not waiting for this instance's answer; it may have been offered to another after ${LIMITS.offerSeconds} s`);
     const execution = (await this.store.getExecution(executionId))!;
-    if (input.answer === 'decline') await this.afterFinish(execution);
+    if (input.answer === 'defer') await this.passOn(execution.commandId);
+    else if (input.answer !== 'accept') await this.afterFinish(execution);
     this.changed();
     return execution;
+  }
+
+  /** The instance says it is still working on a job, optionally how far along (a percentage) and a short note (D-180). */
+  async progress(caller: string | null, input: { instanceId: unknown; executionId: unknown; percent?: unknown; note?: unknown }) {
+    const { instance } = await this.ownInstance(caller, input.instanceId);
+    const executionId = text(input.executionId, 'executionId');
+    if (input.percent !== undefined && (typeof input.percent !== 'number' || !Number.isFinite(input.percent) || input.percent < 0 || input.percent > 100)) throw new CapabilityRecordError('percent must be a number from 0 to 100');
+    const progress = { at: new Date().toISOString(), ...(input.percent !== undefined ? { percent: input.percent as number } : {}), ...(input.note !== undefined ? { note: text(input.note, 'note', 200) } : {}) };
+    if (!(await this.store.change(executionId, { status: 'RUNNING', instanceId: instance.id }, { progress }))) throw new CapabilityRecordError(`Execution ${executionId} is not running on this instance`);
+    return { executionId, progress };
+  }
+
+  /**
+   * Marks failed every execution whose service has not said it is still working for `silentMs` (D-180): it crashed or
+   * hung in the middle of the job. Under a list in order the next service is tried. Says which were marked.
+   */
+  async markSilent(silentMs: number = LIMITS.silentSeconds * 1000) {
+    const cutoff = Date.now() - silentMs;
+    const marked: string[] = [];
+    for (const execution of await this.store.listRunning()) {
+      const last = Date.parse(execution.progress?.at ?? execution.startedAt ?? execution.createdAt);
+      if (last >= cutoff) continue;
+      const now = new Date().toISOString();
+      if (await this.store.change(execution.id, { status: 'RUNNING', instanceId: execution.instanceId! }, { status: 'FAILED', completedAt: now, error: `stopped reporting: no word from the service for ${Math.round(silentMs / 1000)} s` })) {
+        marked.push(execution.id);
+        await this.afterFinish((await this.store.getExecution(execution.id))!);
+      }
+    }
+    if (marked.length) this.changed();
+    return marked;
+  }
+
+  private reasons(value: unknown): UnavailableReason[] {
+    if (!Array.isArray(value) || !value.length || value.length > 20) throw new CapabilityRecordError('reasons must list 1 to 20 reasons, each { kind, lasting, needed?, available?, note? }');
+    return value.map((item) => {
+      const reason = item as Record<string, unknown>;
+      if (!reason || typeof reason !== 'object' || !(UNAVAILABLE_KINDS as readonly unknown[]).includes(reason.kind)) throw new CapabilityRecordError(`Each reason's kind must be one of ${UNAVAILABLE_KINDS.join(', ')}`);
+      if (reason.lasting !== 'temporary' && reason.lasting !== 'permanent') throw new CapabilityRecordError('Each reason says whether it is temporary or permanent (lasting)');
+      return { kind: reason.kind as UnavailableReason['kind'], lasting: reason.lasting, ...(reason.needed !== undefined ? { needed: text(reason.needed, 'needed', 100) } : {}), ...(reason.available !== undefined ? { available: text(reason.available, 'available', 100) } : {}), ...(reason.note !== undefined ? { note: text(reason.note, 'note', 200) } : {}) };
+    });
   }
 
   /** The instance reports what it did: a small answer inline, or a reference to where it stored a larger one; or that it failed. */
@@ -301,26 +384,46 @@ export class CapabilityWork {
   }
 
   /**
-   * After an execution finishes: under dynamic, a declined or failed one passes the command to the next service in the
-   * order asked for that has a running copy; a bound command never passes to another service. When every execution has
-   * finished, the command's status says so.
+   * Under a list in order (dynamic), when nothing is being worked on or waiting to be offered now (a deferred execution
+   * waits for its time), the command passes to the next service in the order asked for that has a running copy. A
+   * bound command never passes to another service. Says whether it passed the command on.
+   */
+  private async passOn(commandId: string) {
+    const command = (await this.core.getCommand(commandId))!;
+    const payload = command.payload as unknown as Payload;
+    if (payload.way !== 'dynamic') return false;
+    const executions = await this.store.listExecutions(commandId);
+    const active = executions.some((item) => item.status === 'SUCCESS' || item.status === 'WAITING' || item.status === 'RUNNING' || (item.status === 'PENDING' && !item.deferred));
+    if (active) return false;
+    const tried = new Set(executions.map((item) => item.serviceVersionId));
+    const installations = await this.records.listInstallations(), instances = await this.records.listInstances();
+    const liveAfter = Date.now() - LIMITS.liveSeconds * 1000;
+    const next = payload.services.filter((id) => !tried.has(id)).find((id) => {
+      const installation = installations.find((item) => item.serviceVersionId === id);
+      return installation && instances.some((item) => item.installationId === installation.id && item.state === 'RUNNING' && Date.parse(item.lastCheckInAt) >= liveAfter);
+    });
+    if (!next) return false;
+    await this.addExecution(commandId, next);
+    return true;
+  }
+
+  /**
+   * After an execution finishes. Under a list in order, a success cancels any deferred one still waiting, and anything
+   * else passes the command to the next service. Under all of them, the command is finished once enough have succeeded
+   * (D-182); the rest carry on and record theirs late. When every execution has finished, the command's status says so.
    */
   private async afterFinish(execution: WorkExecution) {
     const command = (await this.core.getCommand(execution.commandId))!;
     const payload = command.payload as unknown as Payload;
-    const executions = await this.store.listExecutions(command.id);
-    if (payload.way === 'dynamic' && execution.status !== 'SUCCESS' && !executions.some((item) => item.status === 'SUCCESS' || !finished(item.status))) {
-      const tried = new Set(executions.map((item) => item.serviceVersionId));
-      const installations = await this.records.listInstallations(), instances = await this.records.listInstances();
-      const liveAfter = Date.now() - LIMITS.liveSeconds * 1000;
-      const next = payload.services.filter((id) => !tried.has(id)).find((id) => {
-        const installation = installations.find((item) => item.serviceVersionId === id);
-        return installation && instances.some((item) => item.installationId === installation.id && item.state === 'RUNNING' && Date.parse(item.lastCheckInAt) >= liveAfter);
-      });
-      if (next) { await this.addExecution(command.id, next); return; }
+    const now = new Date().toISOString();
+    if (payload.way === 'dynamic') {
+      if (execution.status === 'SUCCESS') await this.store.cancelPending(command.id, now);
+      else if (await this.passOn(command.id)) return;
     }
-    const now = await this.store.listExecutions(command.id);
-    if (now.every((item) => finished(item.status))) await this.core.updateCommandStatus({ commandId: command.id, status: now.some((item) => item.status === 'SUCCESS') ? 'SUCCESS' : 'FAILED' });
+    const executions = await this.store.listExecutions(command.id);
+    const succeeded = executions.filter((item) => item.status === 'SUCCESS').length;
+    if (payload.enough && succeeded >= payload.enough && !finished(command.status)) { await this.core.updateCommandStatus({ commandId: command.id, status: 'SUCCESS' }); return; }
+    if (executions.every((item) => finished(item.status))) await this.core.updateCommandStatus({ commandId: command.id, status: succeeded ? 'SUCCESS' : 'FAILED' });
   }
 
   private async entries(commandId: string): Promise<ResultEntry[]> {
@@ -330,7 +433,8 @@ export class CapabilityWork {
       return {
         executionId: execution.id, serviceVersionId: execution.serviceVersionId, serviceKey: services.find((service) => service.id === execution.serviceVersionId)?.serviceKey ?? '', status: execution.status,
         ...(answer?.outcome ? { outcome: answer.outcome } : {}), ...(answer?.answer !== undefined ? { answer: answer.answer } : {}), ...(answer?.reference ? { reference: answer.reference } : {}),
-        ...(execution.notNow ? { notNow: execution.notNow } : {}), ...(execution.error ? { error: execution.error } : {}),
+        ...(execution.notNow ? { notNow: execution.notNow } : {}), ...(execution.status === 'PENDING' && execution.deferred ? { deferredUntil: execution.deferred.until } : {}),
+        ...(execution.status === 'RUNNING' && execution.progress ? { progress: execution.progress } : {}), ...(execution.error ? { error: execution.error } : {}),
       };
     }));
   }
