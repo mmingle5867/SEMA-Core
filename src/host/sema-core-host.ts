@@ -213,10 +213,20 @@ export class SemaCoreHost {
       throw error;
     }
   }
-  /** An application runs an operation of a capability. The "may" step is the permission capability.<key> (D-163). */
+  /**
+   * An application runs an operation of a capability. The "may" step is the permission capability.<key> (D-163), with the
+   * organization's choices (D-193), and capability.<key>.job.<job> when the operation names a job (D-174).
+   */
   async runCapability(context: CoreHostRequestContext, input: Parameters<CapabilityWork['run']>[1]) {
     await this.refuseWhileLocked();
-    return this.work((work) => work.run(context.actorId, input ?? {} as never, (capabilityKey) => this.authorization.canAdminister({ actorId: context.actorId, resource: `capability.${capabilityKey}` })));
+    const actorId = context.actorId;
+    return this.work((work) => work.run(actorId, input ?? {} as never, async (request) => {
+      const answer = this.authorization.mayRunCapability
+        ? await this.authorization.mayRunCapability({ actorId, ...request })
+        : { allowed: await this.authorization.canAdminister({ actorId, resource: `capability.${request.capabilityKey}` }) };
+      if (answer.allowed && request.jobKey && !(await this.authorization.canAdminister({ actorId, resource: `capability.${request.capabilityKey}.job.${request.jobKey}` }))) return { allowed: false };
+      return answer;
+    }));
   }
   /** The application that issued a command waits on it again, by its reference. */
   async waitOnCapabilityCommand(context: CoreHostRequestContext, input: Parameters<CapabilityWork['waitOn']>[1]) { return this.work((work) => work.waitOn(context.actorId, input ?? {} as never)); }
