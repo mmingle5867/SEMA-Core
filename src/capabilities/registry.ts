@@ -241,6 +241,14 @@ export class CapabilityRegistry {
     if (typeof value.runsWhere !== 'string' || !RUNS_WHERE.has(value.runsWhere)) throw new CapabilityRecordError('declarations.runsWhere must be device, remote or either');
     if (typeof value.offline !== 'boolean') throw new CapabilityRecordError('declarations.offline must be true or false');
     if (!Array.isArray(value.systems) || !value.systems.length || !value.systems.every((system) => typeof system === 'string' && system.trim())) throw new CapabilityRecordError('declarations.systems must list the operating systems it runs on');
+    // What it needs to run (D-181), checked against what its running copies report.
+    if (value.needs !== undefined) {
+      if (!isObject(value.needs)) throw new CapabilityRecordError('declarations.needs must be an object: memoryMb, diskMb, cores, graphicsMb');
+      for (const [key, amount] of Object.entries(value.needs)) {
+        if (!['memoryMb', 'diskMb', 'cores', 'graphicsMb'].includes(key)) throw new CapabilityRecordError(`declarations.needs.${key} is not known: use memoryMb, diskMb, cores or graphicsMb`);
+        if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) throw new CapabilityRecordError(`declarations.needs.${key} must be a number above 0`);
+      }
+    }
     return value as ServiceDeclarations;
   }
 

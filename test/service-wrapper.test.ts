@@ -58,7 +58,7 @@ const a = await ServiceWrapper.start({
 });
 const b = await ServiceWrapper.start({
   coreUrl, applicationKey: 'svc.b', secret: 'secret-b', key: await new MemoryKeyStore().open(), service: { serviceKey: 'neo.test.echo-b', version: '1.0.0' }, contract,
-  workWaitSeconds: 1, retryMs: 100, log: (line) => logB.push(line),
+  workWaitSeconds: 1, retryMs: 100, log: (line) => logB.push(line), checkNetwork: async () => false,
   operations: { echo: async (input) => ({ answer: { text: `B: ${(input as { text: string }).text}` } }) },
 });
 try {
@@ -67,6 +67,13 @@ try {
   assert.ok(a.instance && b.instance, `both recorded: ${[...logA, ...logB].join(' | ')}`);
   assert.equal((await records.getInstance(a.instance!))!.applicationKey, 'svc.a');
   assert.equal((await records.getInstance(a.instance!))!.capacity, 2);
+  // Each copy reports what its machine has (D-181): memory, disk and processor always; the network when the service can tell.
+  const reported = (await records.getInstance(a.instance!))!.resources as { memory: { freeMb: number; totalMb: number }; disk?: { totalMb: number }; processor: { cores: number }; network?: boolean };
+  assert.ok(reported.memory.totalMb > 0 && reported.memory.freeMb <= reported.memory.totalMb, 'memory, free and in all');
+  assert.ok(reported.disk && reported.disk.totalMb > 0, 'disk where it runs');
+  assert.ok(reported.processor.cores >= 1, 'processor cores');
+  assert.equal(reported.network, undefined, 'A has no network check, so it does not say');
+  assert.equal(((await records.getInstance(b.instance!))!.resources as { network?: boolean }).network, false, 'B checked, and has none');
 
   // Bound, dynamic and consensus, through the wrapper.
   let result = await run({ way: 'bound', services: ['neo.test.echo-a'], input: { text: 'hi' } });

@@ -45,13 +45,53 @@ export const MEASURE_UNITS: Record<typeof MEASURED_KINDS[number], string> = { me
 export type UnavailableReason = { kind: typeof UNAVAILABLE_KINDS[number]; lasting: 'temporary' | 'permanent'; needed?: number; free?: number; total?: number; note?: string };
 const isMeasured = (kind: string): kind is typeof MEASURED_KINDS[number] => (MEASURED_KINDS as readonly string[]).includes(kind);
 
+/**
+ * What a running copy reports about its machine at every check-in (D-181): whether it has the network, and free and total
+ * memory, disk and graphics-card memory in megabytes, and processor cores. Any part may be missing when the copy cannot
+ * tell; `graphics: null` means the machine has no graphics card it can use.
+ */
+export type MachineReport = { network?: boolean; memory?: { freeMb: number; totalMb: number }; disk?: { freeMb: number; totalMb: number }; processor?: { cores: number; freeCores?: number }; graphics?: { freeMb: number; totalMb: number } | null };
+/** What a service declares it needs (N8, D-181): the network (from `offline: false`), and at least so much of each. */
+export type ServiceNeeds = { network: boolean; memoryMb?: number; diskMb?: number; cores?: number; graphicsMb?: number };
+
+export function needsOf(declarations: JsonObject): ServiceNeeds {
+  const needs = (declarations.needs && typeof declarations.needs === 'object' && !Array.isArray(declarations.needs) ? declarations.needs : {}) as Record<string, unknown>;
+  const amount = (key: string) => typeof needs[key] === 'number' && (needs[key] as number) > 0 ? { [key]: needs[key] as number } : {};
+  return { network: declarations.offline === false, ...amount('memoryMb'), ...amount('diskMb'), ...amount('cores'), ...amount('graphicsMb') };
+}
+
+/**
+ * Where a copy's machine falls short of a service's needs, right now (D-181), each temporary or permanent by D-185. A part
+ * the copy did not report is not held against it: Core cannot tell, and the service itself can still say unavailable.
+ */
+export function shortfalls(needs: ServiceNeeds, report: MachineReport | undefined): UnavailableReason[] {
+  const found: UnavailableReason[] = [];
+  const measured = (kind: 'memory' | 'disk' | 'graphics', needed: number | undefined, part: { freeMb: number; totalMb: number } | null | undefined) => {
+    if (!needed || !part || typeof part.totalMb !== 'number') return;
+    if (needed > part.totalMb) found.push({ kind, lasting: 'permanent', needed, free: part.freeMb, total: part.totalMb });
+    else if (typeof part.freeMb === 'number' && needed > part.freeMb) found.push({ kind, lasting: 'temporary', needed, free: part.freeMb, total: part.totalMb });
+  };
+  if (needs.network && report?.network === false) found.push({ kind: 'network', lasting: 'temporary', note: 'no network' });
+  measured('memory', needs.memoryMb, report?.memory);
+  measured('disk', needs.diskMb, report?.disk);
+  if (needs.graphicsMb && report?.graphics === null) found.push({ kind: 'graphics', lasting: 'permanent', note: 'this machine has no graphics card it can use' });
+  else measured('graphics', needs.graphicsMb, report?.graphics);
+  const processor = report?.processor;
+  if (needs.cores && processor && typeof processor.cores === 'number') {
+    if (needs.cores > processor.cores) found.push({ kind: 'processor', lasting: 'permanent', needed: needs.cores, ...(typeof processor.freeCores === 'number' ? { free: processor.freeCores } : {}), total: processor.cores });
+    else if (typeof processor.freeCores === 'number' && needs.cores > processor.freeCores) found.push({ kind: 'processor', lasting: 'temporary', needed: needs.cores, free: processor.freeCores, total: processor.cores });
+  }
+  return found;
+}
+
 /** A reason in plain words, such as "memory: needs 8192 MB, this machine has 4096 MB in all (permanent)". */
 export function describeReason(reason: UnavailableReason) {
   if (isMeasured(reason.kind) && reason.needed !== undefined && reason.total !== undefined) {
     const unit = MEASURE_UNITS[reason.kind];
+    const of = (amount: number) => `${amount} ${amount === 1 && unit === 'cores' ? 'core' : unit}`;
     return reason.lasting === 'permanent'
-      ? `${reason.kind}: needs ${reason.needed} ${unit}, this machine has ${reason.total} ${unit} in all (permanent)`
-      : `${reason.kind}: needs ${reason.needed} ${unit}, ${reason.free ?? 0} ${unit} of ${reason.total} ${unit} free, the rest in use (temporary)`;
+      ? `${reason.kind}: needs ${of(reason.needed)}, this machine has ${of(reason.total)} in all (permanent)`
+      : `${reason.kind}: needs ${of(reason.needed)}, ${of(reason.free ?? 0)} of ${of(reason.total)} free, the rest in use (temporary)`;
   }
   return `${reason.kind}${reason.note ? `: ${reason.note}` : ''} (${reason.lasting})`;
 }
@@ -396,19 +436,35 @@ export class CapabilityWork {
     if (way === 'bound' && named.length !== 1) throw new CapabilityRecordError('Bound runs exactly one service: name it, and only it');
     if (way === 'dynamic' && !named.length) throw new CapabilityRecordError('Dynamic needs the services in order of preference');
     const requested = way === 'consensus' && !named.length ? all : named;
-    // Can: which requested services have a running copy that has checked in lately, and why the others cannot run (CL-8).
-    const installations = await this.records.listInstallations(), instances = await this.records.listInstances();
-    const liveAfter = Date.now() - LIMITS.liveSeconds * 1000;
+    // Can (CL-8, D-181): which requested services have a running copy that has checked in lately and whose machine meets
+    // what the service needs now, and why the others cannot run.
     const live = new Map<string, ServiceInstance[]>(), reasons: string[] = [];
     for (const service of requested) {
-      const installation = installations.find((item) => item.serviceVersionId === service.id);
-      const copies = installation ? instances.filter((item) => item.installationId === installation.id && item.state === 'RUNNING' && Date.parse(item.lastCheckInAt) >= liveAfter) : [];
-      live.set(service.id, copies);
-      if (!installation) reasons.push(`${service.serviceKey} ${service.version}: not installed on this machine (permanent until it is installed)`);
-      else if (!copies.length) reasons.push(`${service.serviceKey} ${service.version}: not running, no copy has checked in for ${LIMITS.liveSeconds} s (temporary)`);
+      const able = await this.able(service);
+      live.set(service.id, able.copies);
+      if (able.reason) reasons.push(`${service.serviceKey} ${service.version}: ${able.reason}`);
     }
     if (!requested.length) reasons.push(`no service of ${capabilityKey} ${version} offers ${operation}`);
     return { capability, operation, way, requested, live, reasons };
+  }
+
+  /**
+   * The running copies of a service that can take its work now: installed here, checked in lately, and on a machine
+   * meeting what the service needs (D-181). When none can, why, temporary or permanent (D-185).
+   */
+  private async able(service: ServiceVersion): Promise<{ copies: ServiceInstance[]; reason?: string }> {
+    const installation = (await this.records.listInstallations()).find((item) => item.serviceVersionId === service.id);
+    if (!installation) return { copies: [], reason: 'not installed on this machine (permanent until it is installed)' };
+    const liveAfter = Date.now() - LIMITS.liveSeconds * 1000;
+    const copies = (await this.records.listInstances()).filter((item) => item.installationId === installation.id && item.state === 'RUNNING' && Date.parse(item.lastCheckInAt) >= liveAfter);
+    if (!copies.length) return { copies: [], reason: `not running, no copy has checked in for ${LIMITS.liveSeconds} s (temporary)` };
+    const needs = needsOf(service.declarations);
+    const checked = copies.map((copy) => ({ copy, short: shortfalls(needs, copy.resources as MachineReport) }));
+    const ready = checked.filter((item) => !item.short.length).map((item) => item.copy);
+    if (ready.length) return { copies: ready };
+    // Every copy falls short: say why, preferring a temporary reason (one copy may yet be able) over a permanent one.
+    const best = checked.find((item) => item.short.every((reason) => reason.lasting === 'temporary')) ?? checked[0];
+    return { copies: [], reason: best.short.map(describeReason).join('; ') };
   }
 
   private async addExecution(commandId: string, serviceVersionId: string) {
@@ -430,12 +486,11 @@ export class CapabilityWork {
     const active = executions.some((item) => item.status === 'SUCCESS' || item.status === 'WAITING' || item.status === 'RUNNING' || (item.status === 'PENDING' && !item.deferred));
     if (active) return false;
     const tried = new Set(executions.map((item) => item.serviceVersionId));
-    const installations = await this.records.listInstallations(), instances = await this.records.listInstances();
-    const liveAfter = Date.now() - LIMITS.liveSeconds * 1000;
-    const next = payload.services.filter((id) => !tried.has(id)).find((id) => {
-      const installation = installations.find((item) => item.serviceVersionId === id);
-      return installation && instances.some((item) => item.installationId === installation.id && item.state === 'RUNNING' && Date.parse(item.lastCheckInAt) >= liveAfter);
-    });
+    let next: string | undefined;
+    for (const id of payload.services.filter((item) => !tried.has(item))) {
+      const service = await this.records.getServiceVersion(id);
+      if (service && (await this.able(service)).copies.length) { next = id; break; }
+    }
     if (!next) return false;
     await this.addExecution(commandId, next);
     return true;

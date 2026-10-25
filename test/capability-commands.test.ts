@@ -4,7 +4,7 @@ import { CapabilityRegistry, CapabilityWork, InMemoryCapabilityStore, InMemorySe
 // Commands to a capability (phase 2): can, may, should, execute; services take work, answer and report; waiting.
 const grants: Record<string, Set<string>> = {
   admin: new Set(['core.capabilities.read', 'core.capabilities.register', 'core.services.install']),
-  'svc.a': new Set(['core.services.run']), 'svc.b': new Set(['core.services.run']),
+  'svc.a': new Set(['core.services.run']), 'svc.b': new Set(['core.services.run']), 'svc.c': new Set(['core.services.run']),
   shop: new Set(['capability.neo.test.echo', 'core.services.run']),
 };
 const allowed = async ({ actorId, resource }: { actorId: string | null; resource: string }) => !!actorId && !!grants[actorId]?.has(resource);
@@ -215,6 +215,43 @@ await accept('svc.b', b.id, offerB.executionId); await finish('svc.b', b.id, off
 state = await host.waitOnCapabilityCommand(as('shop'), { commandId: result.commandId, waitSeconds: 1 });
 assert.deepEqual(state.entries.map((entry) => entry.status), ['SUCCESS', 'SUCCESS'], 'the late one recorded its answer');
 assert.deepEqual(state.result!.entries.map((entry) => entry.status).sort(), ['PENDING', 'SUCCESS'], "the command's one result never changes");
+
+// ---- Phase 3b: "can" compares what a service needs with what its copies' machines have (D-181, D-185) ----
+await assert.rejects(() => host.registerServiceVersion(as('admin'), { serviceKey: 'neo.test.echo-c', version: '1.0.0', capabilityVersionId: capability.id, displayName: 'Echo C', operations: ['echo'], declarations: { ...declarations, needs: { speed: 9 } } }), /declarations.needs.speed is not known/);
+await assert.rejects(() => host.registerServiceVersion(as('admin'), { serviceKey: 'neo.test.echo-c', version: '1.0.0', capabilityVersionId: capability.id, displayName: 'Echo C', operations: ['echo'], declarations: { ...declarations, needs: { memoryMb: 0 } } }), /must be a number above 0/);
+const needy = await host.registerServiceVersion(as('admin'), { serviceKey: 'neo.test.echo-c', version: '1.0.0', capabilityVersionId: capability.id, displayName: 'Echo C', operations: ['echo'], declarations: { runsWhere: 'remote', offline: false, systems: ['windows'], needs: { memoryMb: 8192, cores: 2 } } });
+const c = await host.startServiceInstance(as('svc.c'), { installationId: (await host.installService(as('admin'), { serviceVersionId: needy.id })).id });
+const machine = (report: object) => host.checkInServiceInstance(as('svc.c'), { instanceId: c.id, resources: report });
+// This machine has less memory than the service needs in all: it can never run here.
+await machine({ network: true, memory: { freeMb: 3000, totalMb: 4096 }, processor: { cores: 8 } });
+await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-c'] }), /neo.test.echo-c 1.0.0: memory: needs 8192 MB, this machine has 4096 MB in all \(permanent\)/);
+// Enough in all, but in use now: not now, try later.
+await machine({ network: true, memory: { freeMb: 1024, totalMb: 16384 }, processor: { cores: 8 } });
+await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-c'] }), /memory: needs 8192 MB, 1024 MB of 16384 MB free, the rest in use \(temporary\)/);
+// It needs the network (it does not work offline), and the machine has none.
+await machine({ network: false, memory: { freeMb: 12000, totalMb: 16384 }, processor: { cores: 8 } });
+await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-c'] }), /network: no network \(temporary\)/);
+await machine({ network: true, memory: { freeMb: 12000, totalMb: 16384 }, processor: { cores: 1 } });
+await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-c'] }), /processor: needs 2 cores, this machine has 1 core in all \(permanent\)/);
+// Under a list in order the next service that can run is chosen; the one that cannot is not even offered the work.
+await machine({ network: false, memory: { freeMb: 12000, totalMb: 16384 }, processor: { cores: 8 } });
+const routed = run({ way: 'dynamic', services: ['neo.test.echo-c', 'neo.test.echo-a'], waitSeconds: 5 });
+offer = await take('svc.a', a.id);
+await accept('svc.a', a.id, offer.executionId); await finish('svc.a', a.id, offer.executionId, 'from A');
+assert.deepEqual((await routed).entries.map((entry) => [entry.serviceKey, entry.status]), [['neo.test.echo-a', 'SUCCESS']]);
+// Once the machine has what it needs, it runs.
+await machine({ network: true, memory: { freeMb: 12000, totalMb: 16384 }, processor: { cores: 8 } });
+const ran = run({ way: 'bound', services: ['neo.test.echo-c'], waitSeconds: 5 });
+offer = await take('svc.c', c.id);
+await accept('svc.c', c.id, offer.executionId); await finish('svc.c', c.id, offer.executionId, 'from C');
+assert.equal((await ran).entries[0].status, 'SUCCESS');
+// A part a copy does not report is not held against it: Core cannot tell, and the service can still say unavailable.
+await machine({});
+const unknown = run({ way: 'bound', services: ['neo.test.echo-c'], waitSeconds: 5 });
+offer = await take('svc.c', c.id);
+await accept('svc.c', c.id, offer.executionId); await finish('svc.c', c.id, offer.executionId);
+assert.equal((await unknown).entries[0].status, 'SUCCESS');
+await host.stopServiceInstance(as('svc.c'), { instanceId: c.id });
 
 // ---- A general capability: callers say what shape they want back, and name the job (D-172 to D-174) ----
 const general = { capabilityKey: 'neo.test.generate', version: '1.0.0', displayName: 'Generate', choosing: ['bound', 'consensus'], operations: [{

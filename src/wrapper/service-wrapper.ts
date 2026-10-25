@@ -1,10 +1,11 @@
-import { freemem } from 'node:os';
+import { statfs } from 'node:fs/promises';
+import { availableParallelism, freemem, totalmem } from 'node:os';
 import { openCoreClientSigning, type CoreClientSigning } from '../keys/client-signing.js';
 import type { StoredKey } from '../keys/machine-key.js';
 import type { JsonValue } from '../core/types.js';
 import { valueProblems } from '../capabilities/schema.js';
 // A type only: nothing from Core's database layer is loaded with the wrapper.
-import type { UnavailableReason } from '../capabilities/work.js';
+import type { MachineReport, UnavailableReason } from '../capabilities/work.js';
 
 /**
  * The wrapper (C6, D-166): the small standard boundary every service runs in, so the service holds only its business
@@ -51,6 +52,13 @@ export interface ServiceWrapperOptions {
   operations: Record<string, Handler>;
   /** Optional: says whether to take a piece of work. Return true to accept, or a reason to decline ("not now"). */
   accept?: (work: Work) => Promise<Decision> | Decision;
+  /**
+   * Whether the machine can reach what the service needs over the network, checked at every check-in (D-181). A service
+   * that works offline leaves it out. A failed or thrown check counts as no network.
+   */
+  checkNetwork?: () => Promise<boolean>;
+  /** The graphics card's free and total memory in megabytes, or null when the machine has none the service can use. Left out when it cannot tell. */
+  graphics?: () => Promise<{ freeMb: number; totalMb: number } | null>;
   /** How often the wrapper says a job is still working, in seconds (default 30, D-180). */
   progressSeconds?: number;
   /** How many jobs at once (1 to 1000). */
@@ -117,7 +125,15 @@ export class ServiceWrapper {
   /** Says a problem once, until it changes or goes away, so a long outage does not fill the log. */
   private problem(message: string) { if (message !== this.lastProblem) { this.lastProblem = message; this.log(message); } }
   private cleared() { if (this.lastProblem) { this.lastProblem = ''; this.log('Core is answering again.'); } }
-  private resources() { return { memoryFreeMb: Math.round(freemem() / 1_048_576) }; }
+  /** What this machine has now (D-181): memory, disk where the service runs, processor cores, and the network and graphics card when the service can tell. */
+  private async resources(): Promise<MachineReport> {
+    const mb = (bytes: number) => Math.round(bytes / 1_048_576);
+    let disk: MachineReport['disk'];
+    try { const fs = await statfs(process.cwd()); disk = { freeMb: mb(Number(fs.bavail) * Number(fs.bsize)), totalMb: mb(Number(fs.blocks) * Number(fs.bsize)) }; } catch { disk = undefined; }
+    const network = this.options.checkNetwork ? await this.options.checkNetwork().catch(() => false) : undefined;
+    const graphics = this.options.graphics ? await this.options.graphics().catch(() => undefined) : undefined;
+    return { memory: { freeMb: mb(freemem()), totalMb: mb(totalmem()) }, ...(disk ? { disk } : {}), processor: { cores: availableParallelism() }, ...(network !== undefined ? { network } : {}), ...(graphics !== undefined ? { graphics } : {}) };
+  }
 
   /** Finds this service version's installation on this machine and records one instance for the whole wrapper. */
   private registering: Promise<string> | undefined;
@@ -130,7 +146,7 @@ export class ServiceWrapper {
       const service = capability && records.services.find((item) => item.serviceKey === serviceKey && item.version === version && item.capabilityVersionId === capability.id && !item.legacy);
       const installation = service && records.installations.find((item) => item.serviceVersionId === service.id);
       if (!installation) throw new Error(`${serviceKey} ${version} for ${this.options.contract.capabilityKey} ${this.options.contract.version} is not installed on this machine yet`);
-      const recorded = await this.call<{ id: string }>('POST', '/v1/core/services/instances', { installationId: installation.id, capacity: this.capacity, resources: this.resources() });
+      const recorded = await this.call<{ id: string }>('POST', '/v1/core/services/instances', { installationId: installation.id, capacity: this.capacity, resources: await this.resources() });
       this.instanceId = recorded.id;
       this.log(`${serviceKey} ${version} is running as instance ${recorded.id}, taking up to ${this.capacity} job${this.capacity === 1 ? '' : 's'} at once.`);
       return recorded.id;
@@ -143,7 +159,7 @@ export class ServiceWrapper {
       try {
         const instanceId = await this.ensureInstance();
         // Held by Core up to 25 s by default; the request itself allows longer, so a held request is not cut off.
-        const { work } = await this.call<{ work: Work | null }>('POST', '/v1/core/services/instances/work', { instanceId, waitSeconds: this.options.workWaitSeconds ?? 25, resources: this.resources() }, 45_000);
+        const { work } = await this.call<{ work: Work | null }>('POST', '/v1/core/services/instances/work', { instanceId, waitSeconds: this.options.workWaitSeconds ?? 25, resources: await this.resources() }, 45_000);
         this.cleared();
         if (!work) continue;
         const job = this.handle(instanceId, work).finally(() => this.running.delete(job));
