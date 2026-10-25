@@ -6,3 +6,5 @@ coverage/
 *.tsbuildinfo
 # Private keys never leave the machine
 /keys/
+# Built by npm run build; never kept in git
+/dist/
