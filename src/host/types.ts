@@ -1,4 +1,5 @@
 import type { CoreCapability, CoreLifecycleStatus, JsonObject, SemaIdentifier } from '../core/types.js';
+import type { MayAnswer, MayRequest } from '../capabilities/work.js';
 
 /**
  * Installation-level settings. `documentationEnabled`, `auditRetentionDays`, `eventRetentionDays`
@@ -71,6 +72,11 @@ export interface CoreHostStore {
 export interface CoreHostAuthorization {
   canRead(input: { actorId: string | null; resource: string }): Promise<boolean>;
   canAdminister(input: { actorId: string | null; resource: string }): Promise<boolean>;
+  /**
+   * The "may" step of a capability command, with the organization's choices that apply (D-193). Without it Core asks
+   * canAdminister for capability.<key> and applies no choices.
+   */
+  mayRunCapability?(input: { actorId: string | null } & MayRequest): Promise<MayAnswer>;
 }
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }

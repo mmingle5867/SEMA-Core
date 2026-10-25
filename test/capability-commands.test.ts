@@ -76,7 +76,7 @@ assert.equal((await core.getCommand(result.commandId))!.status, 'SUCCESS');
 // Bound never passes to another service: B is not running, and asking for it fails with the reason.
 await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-b'] }), /No service can run now\. neo\.test\.echo-b 1\.0\.0: not running/);
 await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-a', 'neo.test.echo-b'] }), /Bound runs exactly one service/);
-await assert.rejects(() => run({ way: 'policy' }), /not available until organization rules are built/);
+await assert.rejects(() => run({ way: 'policy' }), /Choosing by policy rules is not built yet/);
 await assert.rejects(() => run({ way: 'whatever', services: ['neo.test.echo-a'] }), /permits choosing its services by bound, dynamic, consensus, policy, not whatever/);
 await assert.rejects(() => run({ way: 'bound', services: ['neo.test.echo-a'], input: { text: 5, more: true } }), /The input does not match neo.test.echo 1.0.0: input.text must be string; input.more is not allowed/);
 

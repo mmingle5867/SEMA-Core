@@ -1,4 +1,5 @@
 import { CoreHostUnavailableError } from './errors.js';
+import type { MayAnswer, MayRequest } from '../capabilities/work.js';
 import type { CoreHostAuthorization } from './types.js';
 
 /** Local-first starter policy. Production adapters replace this with Core policy evaluation. */
@@ -18,14 +19,14 @@ export class FoundationPolicyAuthorization implements CoreHostAuthorization {
   constructor(private readonly policyUrl: string, private readonly policyKey: string, clients: Array<{ applicationKey: string; secret: string }>) {
     for (const client of clients) if (client.applicationKey && client.secret) this.clients.set(client.applicationKey, client.secret);
   }
-  private async evaluate(actorId: string | null, resource: string) {
-    if (!actorId || !this.clients.has(actorId)) return false;
+  private async evaluate(actorId: string | null, resource: string, extra: Record<string, string> = {}): Promise<{ allowed?: boolean; choices?: MayAnswer['choices'] }> {
+    if (!actorId || !this.clients.has(actorId)) return { allowed: false };
     // A permission that cannot be checked is refused, and the caller is told why in plain words, not with a bare error.
     let response: Response;
     try {
       response = await fetch(`${this.policyUrl}/v1/access/policy/evaluate`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-sema-access-policy-key': this.policyKey },
-        body: JSON.stringify({ applicationKey: actorId, operation: resource }),
+        body: JSON.stringify({ applicationKey: actorId, operation: resource, ...extra }),
         signal: AbortSignal.timeout(10_000),
       });
     } catch {
@@ -33,10 +34,15 @@ export class FoundationPolicyAuthorization implements CoreHostAuthorization {
     }
     if (response.status === 401 || response.status === 403) throw new CoreHostUnavailableError("Foundation Access refused Core's policy key, so Core cannot check permissions. Check SEMA_POLICY_KEY in Core's .env against Foundation Access");
     if (response.status >= 500) throw new CoreHostUnavailableError(`Foundation Access answered with an error (${response.status}), so Core cannot check permissions`);
-    if (!response.ok) return false;
-    const value = await response.json() as { allowed?: boolean };
-    return value.allowed === true;
+    if (!response.ok) return { allowed: false };
+    return await response.json() as { allowed?: boolean; choices?: MayAnswer['choices'] };
   }
-  async canRead(input: { actorId: string | null; resource: string }) { return this.evaluate(input.actorId, input.resource); }
-  async canAdminister(input: { actorId: string | null; resource: string }) { return this.evaluate(input.actorId, input.resource); }
+  async canRead(input: { actorId: string | null; resource: string }) { return (await this.evaluate(input.actorId, input.resource)).allowed === true; }
+  async canAdminister(input: { actorId: string | null; resource: string }) { return (await this.evaluate(input.actorId, input.resource)).allowed === true; }
+  /** capability.<key>, with the command's job and workspace, so Access can say which organization's choices apply (D-193). */
+  async mayRunCapability(input: { actorId: string | null } & MayRequest): Promise<MayAnswer> {
+    const { actorId, capabilityKey, jobKey, workspaceId } = input;
+    const value = await this.evaluate(actorId, `capability.${capabilityKey}`, { capabilityKey, ...(jobKey ? { jobKey } : {}), ...(workspaceId ? { workspaceId } : {}) });
+    return value.allowed === true ? { allowed: true, ...(value.choices ? { choices: value.choices } : {}) } : { allowed: false };
+  }
 }

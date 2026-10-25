@@ -6,10 +6,14 @@ import { FoundationPolicyAuthorization, InMemoryLocalNodeStore, InMemorySemaCore
 // When Foundation Access cannot answer, Core refuses and says why in plain words.
 const clients = [{ applicationKey: 'console', secret: 'console-secret' }];
 let answer = 200;
-const access = createServer((request, response) => {
+let sent: Record<string, unknown> = {};
+const choices = { lists: [['neo.ai.claude']], way: 'dynamic', approvalRequired: false, approved: [] };
+const access = createServer(async (request, response) => {
   if (answer !== 200) { response.writeHead(answer, { 'content-type': 'application/json' }); return response.end('{}'); }
+  let text = ''; for await (const chunk of request) text += chunk;
+  sent = JSON.parse(text) as Record<string, unknown>;
   response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ allowed: true }));
+  response.end(JSON.stringify({ allowed: true, ...(sent.capabilityKey ? { organizationId: '3-9rJ', choices } : {}) }));
 });
 await new Promise<void>((resolve) => access.listen(0, '127.0.0.1', resolve));
 const accessUrl = `http://127.0.0.1:${(access.address() as net.AddressInfo).port}`;
@@ -17,6 +21,10 @@ const accessUrl = `http://127.0.0.1:${(access.address() as net.AddressInfo).port
 const policy = new FoundationPolicyAuthorization(accessUrl, 'policy-key', clients);
 assert.equal(await policy.canRead({ actorId: 'console', resource: 'core.topology.read' }), true);
 assert.equal(await policy.canRead({ actorId: 'stranger', resource: 'core.topology.read' }), false, 'an unknown caller is refused without asking');
+// A capability command: Core sends the capability, job and workspace, and gets the organization's choices back (D-193).
+assert.deepEqual(await policy.mayRunCapability({ actorId: 'console', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' }), { allowed: true, choices });
+assert.deepEqual(sent, { applicationKey: 'console', operation: 'capability.sema.ai.generate', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' });
+assert.deepEqual(await policy.mayRunCapability({ actorId: 'stranger', capabilityKey: 'sema.ai.generate' }), { allowed: false });
 answer = 401;
 await assert.rejects(() => policy.canRead({ actorId: 'console', resource: 'core.topology.read' }), /refused Core's policy key.*SEMA_POLICY_KEY/);
 answer = 500;

@@ -181,6 +181,29 @@ export class InMemoryWorkStore implements WorkStore {
 }
 
 /** A refusal at the "may" step. It says only "not allowed" (D-150, D-163). */
+/**
+ * The organization's choices that apply to a command (D-190 to D-195), as Foundation Access gives them with its "may"
+ * answer. lists: the ordered lists of services that apply, most specific first; a service must be on every one. An entry
+ * is a service key (its versions, newest first) or key@version. way: the default way of choosing. approved: the service
+ * version IDs approved for the organization, which count only when approvalRequired.
+ */
+export type OrganizationChoices = { lists: string[][]; way?: ChoosingWay; approvalRequired: boolean; approved: string[] };
+export type MayAnswer = { allowed: boolean; choices?: OrganizationChoices };
+export type MayRequest = { capabilityKey: string; jobKey?: string; workspaceId?: string };
+
+/** Whether a list entry names this service: its key, or its key and version. */
+const names = (entry: string, service: ServiceVersion) => { const [key, version] = entry.split('@'); return key === service.serviceKey && (version === undefined || version === service.version); };
+/** Newer versions first: compared part by part, numbers as numbers. */
+const newerFirst = (a: ServiceVersion, b: ServiceVersion) => {
+  const left = a.version.split(/[.+-]/), right = b.version.split(/[.+-]/);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const x = left[i] ?? '', y = right[i] ?? '';
+    const difference = /^\d+$/.test(x) && /^\d+$/.test(y) ? Number(y) - Number(x) : y.localeCompare(x);
+    if (difference) return difference;
+  }
+  return 0;
+};
+
 export class NotAllowedError extends Error { constructor() { super('Not allowed'); this.name = 'NotAllowedError'; } }
 
 type Payload = { capabilityVersionId: string; capabilityKey: string; version: string; operation: string; way: ChoosingWay; services: string[]; input: JsonValue; enough?: number };
@@ -204,29 +227,32 @@ export class CapabilityWork {
   ) { this.changes.setMaxListeners(0); }
 
   /**
-   * Runs an operation of a capability. `mayUse` asks Foundation Access whether the caller may use the capability; when it
-   * says no, the caller is told only "not allowed", never which services exist or why they could not run.
+   * Runs an operation of a capability. `may` asks Foundation Access whether the caller may use the capability (and its
+   * job), and gets the organization's choices with the answer; when it says no, the caller is told only "not allowed",
+   * never which services exist or why they could not run.
    */
-  async run(caller: string | null, input: { capabilityKey: unknown; version: unknown; operation: unknown; way: unknown; services?: unknown; input?: unknown; waitSeconds?: unknown; workspaceId?: unknown; enough?: unknown }, mayUse: (capabilityKey: string) => Promise<boolean>) {
+  async run(caller: string | null, input: { capabilityKey: unknown; version: unknown; operation: unknown; way?: unknown; services?: unknown; input?: unknown; waitSeconds?: unknown; workspaceId?: unknown; enough?: unknown }, may: (request: MayRequest) => Promise<MayAnswer>) {
     if (!caller) throw new CapabilityRecordError('Only a program that has proved who it is may issue a command');
     if ((await this.records.listInstances()).some((instance) => instance.applicationKey === caller)) throw new CapabilityRecordError('A service never issues a command: this program key runs a service (D-160)');
     const capabilityKey = text(input.capabilityKey, 'capabilityKey', 120), version = text(input.version, 'version', 40);
     const waitSeconds = seconds(input.waitSeconds, LIMITS.maxWaitSeconds, 30);
 
-    // Can: work out what could run, but say nothing about it until "may" has passed.
     const capability = await this.records.findCapabilityVersion(capabilityKey, version);
-    let plan: { capability: CapabilityVersion; operation: string; way: ChoosingWay; requested: ServiceVersion[]; live: Map<string, ServiceInstance[]>; reasons: string[] } | Error;
-    try { plan = await this.plan(capability, capabilityKey, version, input); } catch (error) { plan = error as Error; }
-    // May: the capability, and the job when the operation names one (D-174). The job key is read before anything else is
-    // checked, so a caller who may not use the job learns nothing more.
+    // May: the capability, and the job when the operation names one (D-174), with the organization's choices (D-193). It
+    // is asked before anything is said about the capability or its services, so a caller who may not use it learns nothing.
     const requested = capability?.operations.find((item) => item.key === input.operation);
     const job = requested?.job && input.input && typeof input.input === 'object' ? (input.input as Record<string, unknown>)[requested.job] as { key?: unknown } | undefined : undefined;
     const jobKey = typeof job?.key === 'string' && /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(job.key) ? job.key : undefined;
-    if (!(await mayUse(capabilityKey)) || (jobKey !== undefined && !(await mayUse(`${capabilityKey}.job.${jobKey}`)))) {
+    const workspaceId = typeof input.workspaceId === 'string' && input.workspaceId ? input.workspaceId : undefined;
+    const refuse = async () => {
       await this.core.recordAudit({ action: 'capability.command.refused', actorId: caller, evidence: { capabilityKey, version, reason: 'not allowed' } });
-      throw new NotAllowedError();
-    }
-    if (plan instanceof Error) throw plan;
+      return new NotAllowedError();
+    };
+    const answer = await may({ capabilityKey, ...(jobKey ? { jobKey } : {}), ...(workspaceId ? { workspaceId } : {}) });
+    if (!answer.allowed) throw await refuse();
+    // Can: what could run, within the organization's choices.
+    const plan = await this.plan(capability, capabilityKey, version, input, answer.choices);
+    if (plan === 'not allowed') throw await refuse();
     // Should: which services, by the way of choosing the command asked for.
     const ready = plan.requested.filter((service) => plan.live.get(service.id)?.length);
     const chosen = plan.way === 'consensus' ? ready : ready.slice(0, 1);
@@ -256,7 +282,7 @@ export class CapabilityWork {
     }
     // Execute: one execution per chosen service. Under dynamic, the rest wait in order in case the first declines.
     const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: (plan.way === 'consensus' ? chosen : plan.requested).map((service) => service.id), input: body, ...(enough ? { enough } : {}) };
-    const command = await this.core.createCommand({ commandType: 'capability.run', actorId: caller, workspaceId: typeof input.workspaceId === 'string' ? input.workspaceId : null, subjectIds: [plan.capability.id], payload: payload as unknown as JsonObject });
+    const command = await this.core.createCommand({ commandType: 'capability.run', actorId: caller, workspaceId: workspaceId ?? null, subjectIds: [plan.capability.id], payload: payload as unknown as JsonObject });
     for (const service of chosen) await this.addExecution(command.id, service.id);
     await this.core.updateCommandStatus({ commandId: command.id, status: 'RUNNING' });
     await this.core.recordAudit({ action: 'capability.command.run', actorId: caller, commandId: command.id, subjectIds: [plan.capability.id, ...chosen.map((service) => service.id)], evidence: { operation: plan.operation, way: plan.way, ...(enough ? { enough } : {}) } });
@@ -414,15 +440,21 @@ export class CapabilityWork {
     return done;
   }
 
-  private async plan(capability: CapabilityVersion | undefined, capabilityKey: string, version: string, input: { operation: unknown; way: unknown; services?: unknown }) {
+  /**
+   * Can, within the organization's choices (D-190 to D-195). A service not on every list that applies, or not approved
+   * where approval is on, is passed over like one that cannot run; when that leaves none, the answer is "not allowed".
+   * A command that names no way gets the default; one that names no services gets the default order.
+   */
+  private async plan(capability: CapabilityVersion | undefined, capabilityKey: string, version: string, input: { operation: unknown; way?: unknown; services?: unknown }, choices?: OrganizationChoices) {
     if (!capability) throw new CapabilityRecordError(`${capabilityKey} ${version} is not registered on this Core`);
     if (capability.status !== 'ACTIVE') throw new CapabilityRecordError(`${capabilityKey} ${version} is not active`);
     if (!capability.choosing.length) throw new CapabilityRecordError(`${capabilityKey} ${version} lists no ways of choosing its services, so it cannot be run by command: programs reach its services directly`);
     const operation = text(input.operation, 'operation', 60);
     if (!capability.operations.some((item) => item.key === operation)) throw new CapabilityRecordError(`${capabilityKey} ${version} has no operation ${operation}`);
-    const way = input.way as ChoosingWay;
-    if (!capability.choosing.includes(way)) throw new CapabilityRecordError(`${capabilityKey} ${version} permits choosing its services by ${capability.choosing.join(', ')}, not ${String(input.way)}`);
-    if (way === 'policy') throw new CapabilityRecordError('Choosing by the organization\'s rules is not available until organization rules are built');
+    const way = (input.way ?? choices?.way) as ChoosingWay;
+    if (way === undefined) throw new CapabilityRecordError(`Name a way of choosing (${capability.choosing.join(', ')}): the organization sets no default for ${capabilityKey}`);
+    if (!capability.choosing.includes(way)) throw new CapabilityRecordError(`${capabilityKey} ${version} permits choosing its services by ${capability.choosing.join(', ')}, not ${String(way)}${input.way === undefined ? ' (the organization\'s default)' : ''}`);
+    if (way === 'policy') throw new CapabilityRecordError('Choosing by policy rules is not built yet; a command that names no way gets the organization\'s default way and order');
     const all = (await this.records.listServiceVersions()).filter((service) => service.capabilityVersionId === capability.id && service.status === 'ACTIVE' && service.operations.includes(operation));
     if (input.services !== undefined && (!Array.isArray(input.services) || !input.services.length || input.services.length > 50)) throw new CapabilityRecordError('services must list 1 to 50 service version IDs or service keys');
     const named = ((input.services ?? []) as unknown[]).map((value) => {
@@ -433,9 +465,16 @@ export class CapabilityWork {
       return matches[0];
     });
     if (new Set(named.map((service) => service.id)).size !== named.length) throw new CapabilityRecordError('services must not repeat');
-    if (way === 'bound' && named.length !== 1) throw new CapabilityRecordError('Bound runs exactly one service: name it, and only it');
-    if (way === 'dynamic' && !named.length) throw new CapabilityRecordError('Dynamic needs the services in order of preference');
-    const requested = way === 'consensus' && !named.length ? all : named;
+    const lists = choices?.lists ?? [];
+    if (way === 'bound' && named.length > 1) throw new CapabilityRecordError('Bound runs exactly one service: name it, and only it');
+    if (!named.length && !lists.length && way !== 'consensus') throw new CapabilityRecordError(way === 'bound' ? 'Bound runs exactly one service: name it, and only it' : 'Dynamic needs the services in order of preference');
+    const usable = (service: ServiceVersion) => lists.every((list) => list.some((entry) => names(entry, service))) && (!choices?.approvalRequired || choices.approved.includes(service.id));
+    // The default order: the most specific list, each entry's versions newest first.
+    const ordered = lists.length ? [...new Set(lists[0].flatMap((entry) => all.filter((service) => names(entry, service)).sort(newerFirst)))] : all;
+    const candidates = named.length ? named : ordered;
+    let requested = candidates.filter(usable);
+    if (candidates.length && !requested.length) return 'not allowed' as const;
+    if (way === 'bound') requested = requested.slice(0, 1);
     // Can (CL-8, D-181): which requested services have a running copy that has checked in lately and whose machine meets
     // what the service needs now, and why the others cannot run.
     const live = new Map<string, ServiceInstance[]>(), reasons: string[] = [];
