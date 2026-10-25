@@ -150,4 +150,12 @@ try {
   server.close();
 }
 
+// When Core is not running, a program is told so in plain words, with what to do, not "fetch failed".
+{
+  const closed = await new Promise<number>((resolve) => { const probe = net.createServer().listen(0, '127.0.0.1', () => { const port = (probe.address() as net.AddressInfo).port; probe.close(() => resolve(port)); }); });
+  const offline = await openCoreClientSigning({ keyFile: '', key: await new MemoryKeyStore().open(), coreUrl: `http://127.0.0.1:${closed}`, applicationKey: 'app', secret: 's' });
+  await assert.rejects(() => offline.fetch('GET', new URL(`http://127.0.0.1:${closed}/v1/core/health`)), new RegExp(`^Error: SEMA Core is not running \\(nothing answers at http://127\\.0\\.0\\.1:${closed}\\)\\. Start the SEMA services in order from the System Console's Service Status page\\.$`));
+  await assert.rejects(() => offline.register(), /SEMA Core is not running/);
+}
+
 console.log('Signed requests test passed.');
