@@ -1,6 +1,6 @@
 {
   "name": "@selo/sema-core",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Local-first SEMA Core: identity, command, event, audit, policy, and capability contracts.",
   "type": "module",
