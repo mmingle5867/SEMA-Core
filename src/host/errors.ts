@@ -23,6 +23,14 @@ export class CoreHostLockedError extends Error {
   }
 }
 
+/** What was asked for does not exist on this Core. Maps to HTTP 404. */
+export class CoreHostNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CoreHostNotFoundError';
+  }
+}
+
 export class CoreHostAuthorizationError extends Error {
   constructor(message: string) {
     super(message);

@@ -18,5 +18,6 @@ export * from './capabilities/registry.js';
 export * from './capabilities/prisma-capability-store.js';
 export * from './capabilities/schema.js';
 export * from './capabilities/work.js';
+export * from './capabilities/describe.js';
 export * from './capabilities/prisma-work-store.js';
 export * from './wrapper/service-wrapper.js';

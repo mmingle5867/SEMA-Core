@@ -1,5 +1,6 @@
 import { CoreHostUnavailableError } from './errors.js';
 import type { MayAnswer, MayRequest } from '../capabilities/work.js';
+import type { ItemNote, NoteLookup } from '../capabilities/describe.js';
 import type { CoreHostAuthorization } from './types.js';
 
 /** Local-first starter policy. Production adapters replace this with Core policy evaluation. */
@@ -39,6 +40,20 @@ export class FoundationPolicyAuthorization implements CoreHostAuthorization {
   }
   async canRead(input: { actorId: string | null; resource: string }) { return (await this.evaluate(input.actorId, input.resource)).allowed === true; }
   async canAdminister(input: { actorId: string | null; resource: string }) { return (await this.evaluate(input.actorId, input.resource)).allowed === true; }
+  /**
+   * The note on a capability or a service (D-199). A description never fails for want of a note: when Foundation Access
+   * cannot be asked, it says why and the description is built from Core's records.
+   */
+  async itemNote(kind: 'capability' | 'service', key: string): Promise<NoteLookup> {
+    try {
+      const response = await fetch(`${this.policyUrl}/v1/access/item-notes/${kind}/${encodeURIComponent(key)}`, { headers: { 'x-sema-access-policy-key': this.policyKey }, signal: AbortSignal.timeout(10_000) });
+      if (response.status === 404) return {};
+      if (!response.ok) return { unavailable: `Foundation Access answered ${response.status} when asked for the note` };
+      return { note: await response.json() as ItemNote };
+    } catch {
+      return { unavailable: `Foundation Access is not reachable at ${this.policyUrl}` };
+    }
+  }
   /** capability.<key>, with the command's job and workspace, so Access can say which organization's choices apply (D-193). */
   async mayRunCapability(input: { actorId: string | null } & MayRequest): Promise<MayAnswer> {
     const { actorId, capabilityKey, jobKey, workspaceId } = input;

@@ -1,6 +1,6 @@
 import type { SemaCore } from '../core/sema-core.js';
 import { SEMA_CORE_VERSION } from '../version.js';
-import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostValidationError } from './errors.js';
+import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostNotFoundError, CoreHostValidationError } from './errors.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import type { CheckInRun, CoreHostAuthorization, CoreHostDocumentation, CoreHostRequestContext, CoreHostSettings, CoreHostStore, KeyLimitCheck, VersionedCoreHostSettings } from './types.js';
 import { DEFAULT_CORE_HOST_SETTINGS } from './default-settings.js';
@@ -15,6 +15,7 @@ import { TOP_LEVEL_BLOCK_COUNT, formatInstallCode, topLevelBlockRange } from './
 import { FIRST_NODE_ID } from './join.js';
 import { CapabilityRecordError, isReservedKey, type CapabilityRegistry } from '../capabilities/registry.js';
 import { NotAllowedError, type CapabilityWork } from '../capabilities/work.js';
+import { describeCapability, describeService, toMarkdown } from '../capabilities/describe.js';
 
 /** How this Core reaches the others: a directory of peers and the stable address other Cores use to reach this one. */
 export interface CoreTopologyOptions {
@@ -170,6 +171,19 @@ export class SemaCoreHost {
     return typeof name === 'string' && isReservedKey(name.trim()) && this.authorization.canAdminister({ actorId: context.actorId, resource: 'core.capabilities.approve' });
   }
   /** Every capability version, service version, installation and instance this Core holds. */
+  /**
+   * SEMA describes itself (D-199 to D-202): a capability or a service, from Core's records and its note in Foundation
+   * Access, as JSON or as Markdown. Reading it needs core.capabilities.read.
+   */
+  async describe(context: CoreHostRequestContext, kind: string, key: string, format: 'json' | 'markdown' = 'json') {
+    await this.requireRead(context, 'core.capabilities.read');
+    if (kind !== 'capability' && kind !== 'service') throw new CoreHostValidationError('Core describes a capability or a service: /v1/core/describe/capability/<key> or /v1/core/describe/service/<key>');
+    const records = await this.records((registry) => registry.list());
+    const lookup = this.authorization.itemNote ? await this.authorization.itemNote(kind, key) : {};
+    const description = kind === 'capability' ? describeCapability(records, key, lookup) : describeService(records, key, lookup);
+    if (!description) throw new CoreHostNotFoundError(`Core holds no ${kind} ${key}`);
+    return format === 'markdown' ? toMarkdown(description) : description;
+  }
   async capabilityRecordList(context: CoreHostRequestContext) { await this.requireRead(context, 'core.capabilities.read'); return this.records((records) => records.list()); }
   async registerCapabilityVersion(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['registerCapabilityVersion']>[0]) {
     await this.requireAdministration(context, 'core.capabilities.register');
