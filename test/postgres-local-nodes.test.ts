@@ -230,6 +230,10 @@ try {
   assert.equal(await work.addResult(commandResult), true);
   assert.equal(await work.addResult({ ...commandResult, id: 'res-3' }), false, 'one command, one result');
   assert.deepEqual(await work.getResult('cmd-1'), commandResult);
+  // A result's notes are kept with it (D-209).
+  const noted = { id: 'res-4', commandId: 'cmd-2', entries: [], recordedAt: t2, notes: ['No organization was found for this command.'] };
+  assert.equal(await work.addResult(noted), true);
+  assert.deepEqual(await work.getResult('cmd-2'), noted);
   // Phase 3a: a deferred execution is not offered before its time; progress is kept; waiting work can be cancelled.
   const soon = new Date(Date.now() + 60_000).toISOString(), now3 = new Date().toISOString();
   await work.addExecution({ id: 'ex-3', commandId: 'cmd-3', serviceVersionId: 'svc-3', status: 'PENDING', createdAt: now3 });
