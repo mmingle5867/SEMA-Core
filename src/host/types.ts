@@ -1,5 +1,6 @@
 import type { CoreCapability, CoreLifecycleStatus, JsonObject, SemaIdentifier } from '../core/types.js';
 import type { MayAnswer, MayRequest } from '../capabilities/work.js';
+import type { NoteLookup } from '../capabilities/describe.js';
 
 /**
  * Installation-level settings. `documentationEnabled`, `auditRetentionDays`, `eventRetentionDays`
@@ -77,6 +78,8 @@ export interface CoreHostAuthorization {
    * canAdminister for capability.<key> and applies no choices.
    */
   mayRunCapability?(input: { actorId: string | null } & MayRequest): Promise<MayAnswer>;
+  /** The note on a capability or a service in Foundation Access, for describing it (D-199). Without it, descriptions come from the records alone. */
+  itemNote?(kind: 'capability' | 'service', key: string): Promise<NoteLookup>;
 }
 
 export interface CoreHostRequestContext { actorId: string | null; metadata?: JsonObject; }

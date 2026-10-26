@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostUnavailableError, CoreHostValidationError } from './errors.js';
+import { CoreHostAuthorizationError, CoreHostLockedError, CoreHostNotFoundError, CoreHostUnavailableError, CoreHostValidationError } from './errors.js';
 import type { CoreHostSettings } from './types.js';
 import type { CoreCapability, CoreCommand, CoreExecution, CoreLifecycleStatus, JsonObject } from '../core/types.js';
 import { SemaCoreHost } from './sema-core-host.js';
@@ -74,6 +74,7 @@ function classify(error: unknown): { status: number; code: string; message: stri
   if (error instanceof CoreHostLockedError) return { status: 423, code: 'LOCKED', message: error.message };
   if (error instanceof CoreHostUnavailableError) return { status: 503, code: 'UNAVAILABLE', message: error.message };
   if (error instanceof CoreHostValidationError) return { status: 400, code: 'INVALID_REQUEST', message: error.message };
+  if (error instanceof CoreHostNotFoundError) return { status: 404, code: 'NOT_FOUND', message: error.message };
   const message = error instanceof Error ? error.message : 'Unexpected Core Host error';
   // Errors raised by custom authorization or store implementations are still recognised by message.
   if (/^Node is suspended/.test(message)) return { status: 423, code: 'SUSPENDED', message };
@@ -128,6 +129,14 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
     if (request.method === 'GET' && url.pathname === '/v1/core/runtime/capabilities') return write(response, 200, await host.discoverCapabilities(context, url.searchParams.get('query') ?? ''));
     if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/authorize') return write(response, 200, await host.authorizeInvocation(context, await json() as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
     if (request.method === 'POST' && url.pathname === '/v1/core/runtime/capabilities/resolve') return write(response, 200, await host.resolveCapability(context, await json() as { capabilityKey: string; actorId?: string | null; workspaceId?: string | null }));
+    // SEMA describes itself (D-199): JSON, or Markdown with ?format=markdown.
+    const described = request.method === 'GET' ? /^\/v1\/core\/describe\/([a-z]+)\/([^/]+)$/.exec(url.pathname) : null;
+    if (described) {
+      const markdown = url.searchParams.get('format') === 'markdown';
+      const value = await host.describe(context, described[1]!, decodeURIComponent(described[2]!), markdown ? 'markdown' : 'json');
+      if (typeof value === 'string') { response.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' }); return response.end(value); }
+      return write(response, 200, value);
+    }
     if (request.method === 'GET' && url.pathname === '/v1/core/capabilities/records') return write(response, 200, await host.capabilityRecordList(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/capabilities/versions') return write(response, 201, await host.registerCapabilityVersion(context, await json() as Parameters<typeof host.registerCapabilityVersion>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/services/versions') return write(response, 201, await host.registerServiceVersion(context, await json() as Parameters<typeof host.registerServiceVersion>[1]));

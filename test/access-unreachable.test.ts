@@ -10,6 +10,12 @@ let sent: Record<string, unknown> = {};
 const choices = { lists: [['neo.ai.claude']], way: 'dynamic', approvalRequired: false, approved: [] };
 const access = createServer(async (request, response) => {
   if (answer !== 200) { response.writeHead(answer, { 'content-type': 'application/json' }); return response.end('{}'); }
+  if (request.method === 'GET') {
+    // A note on a capability or a service: one exists for neo.ai.claude only.
+    const found = request.url === '/v1/access/item-notes/service/neo.ai.claude' && request.headers['x-sema-access-policy-key'] === 'policy-key';
+    response.writeHead(found ? 200 : 404, { 'content-type': 'application/json' });
+    return response.end(JSON.stringify(found ? { kind: 'service', key: 'neo.ai.claude', summary: 'Claude' } : { error: 'No note' }));
+  }
   let text = ''; for await (const chunk of request) text += chunk;
   sent = JSON.parse(text) as Record<string, unknown>;
   response.writeHead(200, { 'content-type': 'application/json' });
@@ -25,6 +31,9 @@ assert.equal(await policy.canRead({ actorId: 'stranger', resource: 'core.topolog
 assert.deepEqual(await policy.mayRunCapability({ actorId: 'console', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' }), { allowed: true, choices });
 assert.deepEqual(sent, { applicationKey: 'console', operation: 'capability.sema.ai.generate', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' });
 assert.deepEqual(await policy.mayRunCapability({ actorId: 'stranger', capabilityKey: 'sema.ai.generate' }), { allowed: false });
+// Notes for descriptions (D-199): read with the policy key; none is not an error.
+assert.deepEqual(await policy.itemNote('service', 'neo.ai.claude'), { note: { kind: 'service', key: 'neo.ai.claude', summary: 'Claude' } });
+assert.deepEqual(await policy.itemNote('capability', 'neo.ai.claude'), {});
 answer = 401;
 await assert.rejects(() => policy.canRead({ actorId: 'console', resource: 'core.topology.read' }), /refused Core's policy key.*SEMA_POLICY_KEY/);
 answer = 500;
@@ -47,6 +56,7 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 const down = await get('/v1/core/topology/local');
 assert.deepEqual([down.status, down.payload.error.code], [503, 'UNAVAILABLE']);
 assert.equal(down.payload.error.message, `Foundation Access is not reachable at ${accessUrl}, so Core cannot check permissions. Start Foundation Access`);
+assert.deepEqual(await policy.itemNote('service', 'neo.ai.claude'), { unavailable: `Foundation Access is not reachable at ${accessUrl}` }, 'a description still comes without its note');
 server.close();
 
 console.log('Access unreachable test passed.');
