@@ -28,7 +28,7 @@ const policy = new FoundationPolicyAuthorization(accessUrl, 'policy-key', client
 assert.equal(await policy.canRead({ actorId: 'console', resource: 'core.topology.read' }), true);
 assert.equal(await policy.canRead({ actorId: 'stranger', resource: 'core.topology.read' }), false, 'an unknown caller is refused without asking');
 // A capability command: Core sends the capability, job and workspace, and gets the organization's choices back (D-193).
-assert.deepEqual(await policy.mayRunCapability({ actorId: 'console', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' }), { allowed: true, choices });
+assert.deepEqual(await policy.mayRunCapability({ actorId: 'console', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' }), { allowed: true, choices, organizationId: '3-9rJ' });
 assert.deepEqual(sent, { applicationKey: 'console', operation: 'capability.sema.ai.generate', capabilityKey: 'sema.ai.generate', jobKey: 'listing-copy', workspaceId: '3-9rK' });
 assert.deepEqual(await policy.mayRunCapability({ actorId: 'stranger', capabilityKey: 'sema.ai.generate' }), { allowed: false });
 // Notes for descriptions (D-199): read with the policy key; none is not an error.

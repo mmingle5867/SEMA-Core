@@ -11,10 +11,11 @@ const grants: Record<string, Set<string>> = {
 };
 const allowed = async ({ actorId, resource }: { actorId: string | null; resource: string }) => !!actorId && !!grants[actorId]?.has(resource);
 let choices: MayAnswer['choices'];
+let organizationId: string | null | undefined;
 const asked: MayRequest[] = [];
 const authorization: CoreHostAuthorization = {
   canRead: allowed, canAdminister: allowed,
-  mayRunCapability: async ({ actorId, ...request }) => { asked.push(request); return (await allowed({ actorId, resource: `capability.${request.capabilityKey}` })) ? { allowed: true, ...(choices ? { choices } : {}) } : { allowed: false }; },
+  mayRunCapability: async ({ actorId, ...request }) => { asked.push(request); return (await allowed({ actorId, resource: `capability.${request.capabilityKey}` })) ? { allowed: true, ...(choices ? { choices } : {}), ...(organizationId !== undefined ? { organizationId } : {}) } : { allowed: false }; },
 };
 const store = new InMemorySemaCoreHostStore();
 const core = new SemaCore(store, { installationId: '3', maxReservationSize: 25 });
@@ -73,6 +74,15 @@ await assert.rejects(() => run({ way: 'bound', services: [a2.id] }), notAllowed,
 // Approvals do not widen a list.
 choices = { lists: [['neo.test.echo-b']], approvalRequired: true, approved: [a1.id, b.id] };
 assert.deepEqual((await run({ way: 'consensus' })).got, ['b']);
+
+// No organization found (no workspace, and the grant names none): the result says the choices were not applied (D-209).
+choices = { lists: [], approvalRequired: false, approved: [] };
+organizationId = null;
+const unplaced = await host.runCapability(as('shop'), { capabilityKey: 'neo.test.echo', version: '1.0.0', operation: 'echo', way: 'consensus', input: { text: 'hi' }, waitSeconds: 0 } as never);
+assert.match(unplaced.notes![0], /^No organization was found for this command/);
+organizationId = '3-9rJ';
+assert.equal((await host.runCapability(as('shop'), { capabilityKey: 'neo.test.echo', version: '1.0.0', operation: 'echo', way: 'consensus', input: { text: 'hi' }, waitSeconds: 0 } as never)).notes, undefined, 'with an organization, no note');
+organizationId = undefined;
 
 // Access is asked once, with the command's workspace.
 asked.length = 0;

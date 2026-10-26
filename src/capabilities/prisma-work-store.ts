@@ -85,12 +85,12 @@ export class PrismaWorkStore implements WorkStore {
   async addResult(result: CommandResult) {
     const added = await this.prisma.$executeRaw`
       INSERT INTO "sema_core_results" ("id", "commandId", "resultType", "subjectIds", "data", "createdAt")
-      VALUES (${result.id}, ${result.commandId}, 'capability.result', '[]'::jsonb, ${JSON.stringify({ entries: result.entries })}::jsonb, ${result.recordedAt}::timestamp)
+      VALUES (${result.id}, ${result.commandId}, 'capability.result', '[]'::jsonb, ${JSON.stringify({ entries: result.entries, ...(result.notes ? { notes: result.notes } : {}) })}::jsonb, ${result.recordedAt}::timestamp)
       ON CONFLICT DO NOTHING`;
     return added === 1;
   }
   async getResult(commandId: string) {
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; data: { entries: CommandResult['entries'] }; createdAt: Date }>>`SELECT "id", "data", "createdAt" FROM "sema_core_results" WHERE "commandId" = ${commandId} AND "resultType" = 'capability.result' LIMIT 1`;
-    return rows[0] ? { id: rows[0].id, commandId, entries: rows[0].data.entries, recordedAt: iso(rows[0].createdAt) } : undefined;
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; data: { entries: CommandResult['entries']; notes?: string[] }; createdAt: Date }>>`SELECT "id", "data", "createdAt" FROM "sema_core_results" WHERE "commandId" = ${commandId} AND "resultType" = 'capability.result' LIMIT 1`;
+    return rows[0] ? { id: rows[0].id, commandId, entries: rows[0].data.entries, recordedAt: iso(rows[0].createdAt), ...(rows[0].data.notes ? { notes: rows[0].data.notes } : {}) } : undefined;
   }
 }

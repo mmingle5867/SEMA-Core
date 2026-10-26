@@ -129,7 +129,8 @@ export interface ResultEntry {
   progress?: WorkExecution['progress'];
   error?: string;
 }
-export interface CommandResult { id: string; commandId: string; entries: ResultEntry[]; recordedAt: string }
+/** notes: what the caller should know about how the command was handled, such as no organization found (D-209). */
+export interface CommandResult { id: string; commandId: string; entries: ResultEntry[]; recordedAt: string; notes?: string[] }
 
 export interface WorkStore {
   addExecution(execution: WorkExecution): Promise<void>;
@@ -195,7 +196,8 @@ export class InMemoryWorkStore implements WorkStore {
  * of each service's settings, by service key (such as { "neo.ai.claude": { model: "claude-sonnet-5-5" } }, D-204).
  */
 export type OrganizationChoices = { lists: string[][]; way?: ChoosingWay; approvalRequired: boolean; approved: string[]; settings?: Record<string, Record<string, string>> };
-export type MayAnswer = { allowed: boolean; choices?: OrganizationChoices };
+/** organizationId: the organization the command belongs to; null when Foundation Access was asked and found none (D-209). */
+export type MayAnswer = { allowed: boolean; choices?: OrganizationChoices; organizationId?: string | null };
 export type MayRequest = { capabilityKey: string; jobKey?: string; workspaceId?: string };
 
 /** Whether a list entry names this service: its key, or its key and version. */
@@ -298,7 +300,9 @@ export class CapabilityWork {
     await this.core.recordAudit({ action: 'capability.command.run', actorId: caller, commandId: command.id, subjectIds: [plan.capability.id, ...chosen.map((service) => service.id)], evidence: { operation: plan.operation, way: plan.way, ...(enough ? { enough } : {}) } });
     await this.waitUntilFinished(command.id, waitSeconds);
     const entries = await this.entries(command.id);
-    const result: CommandResult = { id: await this.issue('RESULT', { commandId: command.id }), commandId: command.id, entries, recordedAt: new Date().toISOString() };
+    // Said plainly when the organization's choices could not apply: no workspace, and the program's grant names no organization (D-209).
+    const notes = answer.organizationId === null ? ['No organization was found for this command (it names no workspace, and the calling program\'s grant names no organization), so the organization\'s choices, such as allowed services and service settings, were not applied.'] : [];
+    const result: CommandResult = { id: await this.issue('RESULT', { commandId: command.id }), commandId: command.id, entries, recordedAt: new Date().toISOString(), ...(notes.length ? { notes } : {}) };
     await this.store.addResult(result);
     return result;
   }
