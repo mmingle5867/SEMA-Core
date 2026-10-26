@@ -2,6 +2,7 @@ import { statfs } from 'node:fs/promises';
 import { availableParallelism, freemem, totalmem } from 'node:os';
 import { openCoreClientSigning, type CoreClientSigning } from '../keys/client-signing.js';
 import type { StoredKey } from '../keys/machine-key.js';
+import type { ServiceOffers } from '../capabilities/records.js';
 import type { JsonValue } from '../core/types.js';
 import { valueProblems } from '../capabilities/schema.js';
 // A type only: nothing from Core's database layer is loaded with the wrapper.
@@ -25,7 +26,8 @@ import type { MachineReport, UnavailableReason } from '../capabilities/work.js';
  * fingerprint before starting (phase 4). Nothing here needs Core's database layer: a service on the same machine loads
  * it from Core's folder (dist/wrapper/service-wrapper.js), as programs load the signing code.
  */
-export interface Work { executionId: string; commandId: string; capabilityKey: string; version: string; operation: string; input: JsonValue }
+/** settings: the organization's choice of this service's settings (D-204), such as { model: "claude-sonnet-5-5" }; empty when none. */
+export interface Work { executionId: string; commandId: string; capabilityKey: string; version: string; operation: string; input: JsonValue; settings?: Record<string, string> }
 export type HandlerResult = { answer: JsonValue; outcome?: Outcome } | { reference: string; outcome?: Outcome };
 export type Outcome = 'achieved' | 'partly' | 'not-achieved' | 'needs-review';
 /** Says the service is still working, optionally how far along (0 to 100) and a short note (D-180). The wrapper also says so on its own every 30 s. */
@@ -48,6 +50,8 @@ export interface ServiceWrapperOptions {
   service: { serviceKey: string; version: string };
   /** The contract it implements, to check answers before reporting them. */
   contract: Contract;
+  /** The settings this service lets an organization choose, with their choices and prices (D-203): reported when it starts. */
+  offers?: ServiceOffers;
   /** One handler per operation the service offers. */
   operations: Record<string, Handler>;
   /** Optional: says whether to take a piece of work. Return true to accept, or a reason to decline ("not now"). */
@@ -146,7 +150,7 @@ export class ServiceWrapper {
       const service = capability && records.services.find((item) => item.serviceKey === serviceKey && item.version === version && item.capabilityVersionId === capability.id && !item.legacy);
       const installation = service && records.installations.find((item) => item.serviceVersionId === service.id);
       if (!installation) throw new Error(`${serviceKey} ${version} for ${this.options.contract.capabilityKey} ${this.options.contract.version} is not installed on this machine yet`);
-      const recorded = await this.call<{ id: string }>('POST', '/v1/core/services/instances', { installationId: installation.id, capacity: this.capacity, resources: await this.resources() });
+      const recorded = await this.call<{ id: string }>('POST', '/v1/core/services/instances', { installationId: installation.id, capacity: this.capacity, resources: await this.resources(), ...(this.options.offers ? { offers: this.options.offers } : {}) });
       this.instanceId = recorded.id;
       this.log(`${serviceKey} ${version} is running as instance ${recorded.id}, taking up to ${this.capacity} job${this.capacity === 1 ? '' : 's'} at once.`);
       return recorded.id;

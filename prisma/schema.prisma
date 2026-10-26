@@ -299,6 +299,8 @@ model SemaServiceInstance {
   state          String   @default("RUNNING")
   /// The program that started it; it can never issue a capability command (D-160).
   applicationKey String?
+  /// The settings it offers the organization, reported when it started (D-203).
+  offers         Json     @default("{}")
 
   @@index([installationId])
   @@index([applicationKey])

@@ -192,7 +192,13 @@ try {
   assert.deepEqual(await capabilities.updateInstance('run-1', { lastCheckInAt: later, resources: { memoryMb: 400 } }), { ...instance, lastCheckInAt: later, resources: { memoryMb: 400 } });
   assert.deepEqual(await capabilities.updateInstance('run-1', { state: 'STOPPED' }), { ...instance, lastCheckInAt: later, resources: { memoryMb: 400 }, state: 'STOPPED' }, 'a change leaves the rest as it was');
   await assert.rejects(() => capabilities.updateInstance('run-9', { state: 'STOPPED' }), /does not exist/);
-  assert.deepEqual([(await capabilities.listCapabilityVersions()).length, (await capabilities.listServiceVersions()).length, (await capabilities.listInstallations()).length, (await capabilities.listInstances()).length], [1, 1, 1, 1]);
+  // What a running copy offers the organization (D-203): kept as reported; none is no field.
+  const offers = { model: { label: 'Model', default: 'big', choices: [{ value: 'big', label: 'Big', inputPerMillion: 4, outputPerMillion: 20 }] } };
+  await capabilities.addInstance({ ...instance, id: 'run-2', offers });
+  assert.deepEqual((await capabilities.getInstance('run-2'))!.offers, offers);
+  assert.deepEqual((await capabilities.updateInstance('run-2', { state: 'STOPPED' })).offers, offers, 'a change keeps what it offers');
+  assert.equal('offers' in (await capabilities.getInstance('run-1'))!, false);
+  assert.deepEqual([(await capabilities.listCapabilityVersions()).length, (await capabilities.listServiceVersions()).length, (await capabilities.listInstallations()).length, (await capabilities.listInstances()).length], [1, 1, 1, 2]);
   const stored = (await prisma.$queryRaw<Array<{ text: string }>>`SELECT "createdAt"::text AS text FROM "sema_core_capability_versions" WHERE "id" = 'cap-1'`)[0].text;
   assert.equal(stored.replace(' ', 'T').slice(0, 19), when.slice(0, 19), 'stored as UTC wall time');
   // Capability commands' executions and results, in Core's execution and result tables.
@@ -216,6 +222,10 @@ try {
   assert.deepEqual((await work.listExecutions('cmd-1')).map((execution) => execution.id), ['ex-1', 'ex-2']);
   await work.addAnswer('res-1', { executionId: 'ex-1', outcome: 'achieved', answer: { text: 'hi' }, recordedAt: t2 });
   assert.deepEqual(await work.getAnswer('ex-1'), { executionId: 'ex-1', outcome: 'achieved', answer: { text: 'hi' }, recordedAt: t2 });
+  // The latest answers of these service versions, for usage figures (D-205).
+  assert.deepEqual(await work.recentAnswers(['svc-1'], 5), [{ serviceVersionId: 'svc-1', answer: { executionId: 'ex-1', outcome: 'achieved', answer: { text: 'hi' }, recordedAt: t2 } }]);
+  assert.deepEqual(await work.recentAnswers(['svc-9'], 5), []);
+  assert.deepEqual(await work.recentAnswers([], 5), []);
   const commandResult = { id: 'res-2', commandId: 'cmd-1', entries: [{ executionId: 'ex-1', serviceVersionId: 'svc-1', serviceKey: 'neo.ai.copy', status: 'SUCCESS' as const, answer: { text: 'hi' } }], recordedAt: t2 };
   assert.equal(await work.addResult(commandResult), true);
   assert.equal(await work.addResult({ ...commandResult, id: 'res-3' }), false, 'one command, one result');

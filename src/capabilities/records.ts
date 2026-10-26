@@ -85,6 +85,13 @@ export interface ServiceInstallation {
   installedAt: string;
 }
 
+/**
+ * The settings a service lets an organization choose (D-203, D-204), as a running copy reports them when it starts: for
+ * each setting (such as model), its label, its default and its choices, each optionally with its price per million
+ * input and output tokens, for comparing costs. A price change needs only a restart.
+ */
+export type ServiceOffers = Record<string, { label: string; default?: string; choices: Array<{ value: string; label: string; inputPerMillion?: number; outputPerMillion?: number; currency?: string; note?: string }> }>;
+
 export interface ServiceInstance {
   id: string;
   installationId: string;
@@ -94,6 +101,8 @@ export interface ServiceInstance {
   capacity: number;
   /** What it last reported having: free memory, disk, network and so on (D-158). */
   resources: JsonObject;
+  /** The settings it offers the organization, reported when it started (D-203). Empty when it offers none. */
+  offers?: ServiceOffers;
   /** STOPPED: it said it stopped. LOST: it stopped checking in, so Core marked it (a crash, a process ended outright, a power cut). */
   state: 'RUNNING' | 'STOPPED' | 'LOST';
   /** The program that started it. That program can never issue a capability command (D-160). Missing on instances recorded before 0.4.0. */

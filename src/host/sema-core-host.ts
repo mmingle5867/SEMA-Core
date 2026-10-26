@@ -184,6 +184,8 @@ export class SemaCoreHost {
     if (!description) throw new CoreHostNotFoundError(`Core holds no ${kind} ${key}`);
     return format === 'markdown' ? toMarkdown(description) : description;
   }
+  /** A service's model and tokens on its latest answers, for estimating costs (D-205). Needs core.capabilities.read. */
+  async serviceUsage(context: CoreHostRequestContext, input: Parameters<CapabilityWork['usage']>[0]) { await this.requireRead(context, 'core.capabilities.read'); return this.work((work) => work.usage(input)); }
   async capabilityRecordList(context: CoreHostRequestContext) { await this.requireRead(context, 'core.capabilities.read'); return this.records((records) => records.list()); }
   async registerCapabilityVersion(context: CoreHostRequestContext, input: Parameters<CapabilityRegistry['registerCapabilityVersion']>[0]) {
     await this.requireAdministration(context, 'core.capabilities.register');

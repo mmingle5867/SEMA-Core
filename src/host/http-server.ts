@@ -137,6 +137,7 @@ async function handleRequest(host: SemaCoreHost, applicationClients: ReadonlyMap
       if (typeof value === 'string') { response.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'no-store' }); return response.end(value); }
       return write(response, 200, value);
     }
+    if (request.method === 'GET' && url.pathname === '/v1/core/services/usage') return write(response, 200, await host.serviceUsage(context, { serviceKey: url.searchParams.get('serviceKey') ?? undefined, ...(url.searchParams.has('limit') ? { limit: url.searchParams.get('limit') } : {}) }));
     if (request.method === 'GET' && url.pathname === '/v1/core/capabilities/records') return write(response, 200, await host.capabilityRecordList(context));
     if (request.method === 'POST' && url.pathname === '/v1/core/capabilities/versions') return write(response, 201, await host.registerCapabilityVersion(context, await json() as Parameters<typeof host.registerCapabilityVersion>[1]));
     if (request.method === 'POST' && url.pathname === '/v1/core/services/versions') return write(response, 201, await host.registerServiceVersion(context, await json() as Parameters<typeof host.registerServiceVersion>[1]));

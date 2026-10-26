@@ -145,6 +145,8 @@ export interface WorkStore {
   listRunning(): Promise<WorkExecution[]>;
   addAnswer(id: string, answer: WorkAnswer): Promise<void>;
   getAnswer(executionId: string): Promise<WorkAnswer | undefined>;
+  /** The latest answers from these service versions, newest first, for usage figures. */
+  recentAnswers(serviceVersionIds: string[], limit: number): Promise<Array<{ serviceVersionId: string; answer: WorkAnswer }>>;
   /** Records the command's one result; refused (false) when it already has one. */
   addResult(result: CommandResult): Promise<boolean>;
   getResult(commandId: string): Promise<CommandResult | undefined>;
@@ -176,6 +178,10 @@ export class InMemoryWorkStore implements WorkStore {
   async listRunning() { return [...this.executions.values()].filter((item) => item.status === 'RUNNING').map(copy); }
   async addAnswer(_id: string, answer: WorkAnswer) { this.answers.set(answer.executionId, copy(answer)); }
   async getAnswer(executionId: string) { const found = this.answers.get(executionId); return found && copy(found); }
+  async recentAnswers(serviceVersionIds: string[], limit: number) {
+    return [...this.answers.values()].map((answer) => ({ serviceVersionId: this.executions.get(answer.executionId)?.serviceVersionId ?? '', answer }))
+      .filter((entry) => serviceVersionIds.includes(entry.serviceVersionId)).sort((a, b) => b.answer.recordedAt.localeCompare(a.answer.recordedAt)).slice(0, limit).map(copy);
+  }
   async addResult(result: CommandResult) { if (this.results.has(result.commandId)) return false; this.results.set(result.commandId, copy(result)); return true; }
   async getResult(commandId: string) { const found = this.results.get(commandId); return found && copy(found); }
 }
@@ -185,9 +191,10 @@ export class InMemoryWorkStore implements WorkStore {
  * The organization's choices that apply to a command (D-190 to D-195), as Foundation Access gives them with its "may"
  * answer. lists: the ordered lists of services that apply, most specific first; a service must be on every one. An entry
  * is a service key (its versions, newest first) or key@version. way: the default way of choosing. approved: the service
- * version IDs approved for the organization, which count only when approvalRequired.
+ * version IDs approved for the organization, which count only when approvalRequired. settings: the organization's choice
+ * of each service's settings, by service key (such as { "neo.ai.claude": { model: "claude-sonnet-5-5" } }, D-204).
  */
-export type OrganizationChoices = { lists: string[][]; way?: ChoosingWay; approvalRequired: boolean; approved: string[] };
+export type OrganizationChoices = { lists: string[][]; way?: ChoosingWay; approvalRequired: boolean; approved: string[]; settings?: Record<string, Record<string, string>> };
 export type MayAnswer = { allowed: boolean; choices?: OrganizationChoices };
 export type MayRequest = { capabilityKey: string; jobKey?: string; workspaceId?: string };
 
@@ -206,7 +213,7 @@ const newerFirst = (a: ServiceVersion, b: ServiceVersion) => {
 
 export class NotAllowedError extends Error { constructor() { super('Not allowed'); this.name = 'NotAllowedError'; } }
 
-type Payload = { capabilityVersionId: string; capabilityKey: string; version: string; operation: string; way: ChoosingWay; services: string[]; input: JsonValue; enough?: number };
+type Payload = { capabilityVersionId: string; capabilityKey: string; version: string; operation: string; way: ChoosingWay; services: string[]; input: JsonValue; enough?: number; settings?: Record<string, Record<string, string>> };
 const text = (value: unknown, name: string, max = 200) => {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new CapabilityRecordError(`${name} must be a non-empty string of at most ${max} characters`);
   return value.trim();
@@ -281,7 +288,10 @@ export class CapabilityWork {
       enough = input.enough as number;
     }
     // Execute: one execution per chosen service. Under dynamic, the rest wait in order in case the first declines.
-    const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: (plan.way === 'consensus' ? chosen : plan.requested).map((service) => service.id), input: body, ...(enough ? { enough } : {}) };
+    const services = plan.way === 'consensus' ? chosen : plan.requested;
+    // The organization's settings for the services that may do this work (D-204), recorded with the command.
+    const settings = Object.fromEntries(services.map((service) => [service.serviceKey, answer.choices?.settings?.[service.serviceKey]]).filter((entry): entry is [string, Record<string, string>] => Boolean(entry[1])));
+    const payload: Payload = { capabilityVersionId: plan.capability.id, capabilityKey, version, operation: plan.operation, way: plan.way, services: services.map((service) => service.id), input: body, ...(enough ? { enough } : {}), ...(Object.keys(settings).length ? { settings } : {}) };
     const command = await this.core.createCommand({ commandType: 'capability.run', actorId: caller, workspaceId: workspaceId ?? null, subjectIds: [plan.capability.id], payload: payload as unknown as JsonObject });
     for (const service of chosen) await this.addExecution(command.id, service.id);
     await this.core.updateCommandStatus({ commandId: command.id, status: 'RUNNING' });
@@ -302,6 +312,23 @@ export class CapabilityWork {
     return { commandId, entries: await this.entries(commandId), result: await this.store.getResult(commandId) };
   }
 
+  /**
+   * A service's usage on its latest answers (D-205): the model and tokens each answer reported, for estimating what a run
+   * costs at each model's price. Only answers that carry usage figures count.
+   */
+  async usage(input: { serviceKey: unknown; limit?: unknown }) {
+    const serviceKey = text(input.serviceKey, 'serviceKey', 120);
+    const limit = input.limit === undefined ? 20 : Number(input.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new CapabilityRecordError('limit must be a whole number from 1 to 200');
+    const versions = (await this.records.listServiceVersions()).filter((service) => service.serviceKey === serviceKey);
+    const recent = await this.store.recentAnswers(versions.map((service) => service.id), limit * 3);
+    const runs = recent.map(({ serviceVersionId, answer }) => {
+      const usage = (answer.answer as { usage?: { model?: unknown; inputTokens?: unknown; outputTokens?: unknown } } | undefined)?.usage;
+      return usage && typeof usage.inputTokens === 'number' && typeof usage.outputTokens === 'number' ? { version: versions.find((service) => service.id === serviceVersionId)?.version, recordedAt: answer.recordedAt, model: typeof usage.model === 'string' ? usage.model : undefined, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } : undefined;
+    }).filter((run): run is NonNullable<typeof run> => Boolean(run)).slice(0, limit);
+    return { serviceKey, runs };
+  }
+
   /** A running copy asks for work, and is held until there is some or its wait runs out. Asking counts as checking in. */
   async takeWork(caller: string | null, input: { instanceId: unknown; waitSeconds?: unknown; resources?: unknown }) {
     const { instance, serviceVersionId } = await this.ownInstance(caller, input.instanceId);
@@ -314,7 +341,9 @@ export class CapabilityWork {
         const command = (await this.core.getCommand(offered.commandId))!;
         const payload = command.payload as unknown as Payload;
         this.changed();
-        return { work: { executionId: offered.id, commandId: offered.commandId, capabilityKey: payload.capabilityKey, version: payload.version, operation: payload.operation, input: payload.input, answerWithinSeconds: LIMITS.offerSeconds } };
+        const serviceKey = (await this.records.getServiceVersion(serviceVersionId))?.serviceKey;
+        const settings = serviceKey ? payload.settings?.[serviceKey] : undefined;
+        return { work: { executionId: offered.id, commandId: offered.commandId, capabilityKey: payload.capabilityKey, version: payload.version, operation: payload.operation, input: payload.input, answerWithinSeconds: LIMITS.offerSeconds, ...(settings ? { settings } : {}) } };
       }
       if (Date.now() >= deadline) return { work: null };
       await this.nextChange(Math.min(1000, deadline - Date.now()));

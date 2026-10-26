@@ -1,5 +1,5 @@
 import type { CoreCapability, JsonObject } from '../core/types.js';
-import { CHOOSING_WAYS, type CapabilityStore, type CapabilityVersion, type ChoosingWay, type OperationDefinition, type ServiceDeclarations, type ServiceInstallation, type ServiceInstance, type ServiceVersion } from './records.js';
+import { CHOOSING_WAYS, type CapabilityStore, type CapabilityVersion, type ChoosingWay, type OperationDefinition, type ServiceDeclarations, type ServiceInstallation, type ServiceInstance, ServiceOffers, type ServiceVersion } from './records.js';
 import { schemaProblems } from './schema.js';
 
 /** A refusal the caller can fix: a bad name, a missing operation, an unknown record. */
@@ -36,6 +36,32 @@ export const isReservedKey = (value: string) => value === 'sema' || value.starts
  * complete and consistent, issues its ID, and keeps it. Published versions are never changed: registering the same
  * key and version again is refused, and a changed contract is a new version.
  */
+const SETTING = /^[a-z][a-z0-9-]{0,39}$/;
+const price = (value: unknown, name: string) => { if (value === undefined) return undefined; if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000) throw new CapabilityRecordError(`${name} must be a price of 0 or more`); return value; };
+const short = (value: unknown, name: string, max: number) => { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new CapabilityRecordError(`${name} must be text of 1 to ${max} characters`); return value.trim(); };
+/** The settings a running copy offers (D-203): checked, so the Console can show them and an organization can choose. */
+export function offersOf(value: unknown): ServiceOffers {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new CapabilityRecordError('offers must be an object: { setting: { label, default, choices } }');
+  if (JSON.stringify(value).length > 16 * 1024) throw new CapabilityRecordError('offers must be at most 16 KB');
+  const out: ServiceOffers = {};
+  for (const [name, setting] of Object.entries(value as Record<string, unknown>)) {
+    if (!SETTING.test(name)) throw new CapabilityRecordError(`offers: ${name} is not a setting name (lowercase letters, digits and hyphens)`);
+    const entry = setting as { label?: unknown; default?: unknown; choices?: unknown };
+    if (!entry || typeof entry !== 'object' || !Array.isArray(entry.choices) || !entry.choices.length || entry.choices.length > 50) throw new CapabilityRecordError(`offers.${name} needs a label and 1 to 50 choices`);
+    const choices = entry.choices.map((choice: { value?: unknown; label?: unknown; inputPerMillion?: unknown; outputPerMillion?: unknown; currency?: unknown; note?: unknown }, i: number) => {
+      const inputPerMillion = price(choice?.inputPerMillion, `offers.${name}.choices[${i}].inputPerMillion`), outputPerMillion = price(choice?.outputPerMillion, `offers.${name}.choices[${i}].outputPerMillion`);
+      return { value: short(choice?.value, `offers.${name}.choices[${i}].value`, 100), label: short(choice?.label, `offers.${name}.choices[${i}].label`, 100),
+        ...(inputPerMillion !== undefined ? { inputPerMillion } : {}), ...(outputPerMillion !== undefined ? { outputPerMillion } : {}),
+        ...(choice?.currency !== undefined ? { currency: short(choice.currency, `offers.${name}.choices[${i}].currency`, 10) } : {}), ...(choice?.note !== undefined ? { note: short(choice.note, `offers.${name}.choices[${i}].note`, 300) } : {}) };
+    });
+    if (new Set(choices.map((choice) => choice.value)).size !== choices.length) throw new CapabilityRecordError(`offers.${name} repeats a choice`);
+    const fallback = entry.default === undefined ? undefined : short(entry.default, `offers.${name}.default`, 100);
+    if (fallback !== undefined && !choices.some((choice) => choice.value === fallback)) throw new CapabilityRecordError(`offers.${name}.default must be one of its choices`);
+    out[name] = { label: short(entry.label, `offers.${name}.label`, 100), ...(fallback !== undefined ? { default: fallback } : {}), choices };
+  }
+  return out;
+}
+
 export class CapabilityRegistry {
   constructor(
     private readonly store: CapabilityStore,
@@ -102,7 +128,7 @@ export class CapabilityRegistry {
   }
 
   /** A running copy starts and says how many jobs it takes at once and what it has (D-158). */
-  async startInstance(input: { installationId: unknown; capacity?: unknown; resources?: unknown }, applicationKey?: string) {
+  async startInstance(input: { installationId: unknown; capacity?: unknown; resources?: unknown; offers?: unknown }, applicationKey?: string) {
     const installation = await this.store.getInstallation(text(input.installationId, 'installationId'));
     if (!installation) throw new CapabilityRecordError(`Installation ${String(input.installationId)} is not on this machine`);
     const capacity = input.capacity === undefined ? 1 : input.capacity;
@@ -111,6 +137,7 @@ export class CapabilityRegistry {
     const record: ServiceInstance = {
       id: await this.issue('SERVICE-INSTANCE', { installationId: installation.id }),
       installationId: installation.id, startedAt: now, lastCheckInAt: now, capacity: capacity as number, resources: this.resources(input.resources), state: 'RUNNING', ...(applicationKey ? { applicationKey } : {}),
+      ...(input.offers === undefined ? {} : { offers: offersOf(input.offers) }),
     };
     await this.store.addInstance(record);
     return record;

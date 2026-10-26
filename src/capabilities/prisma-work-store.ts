@@ -75,6 +75,13 @@ export class PrismaWorkStore implements WorkStore {
     const rows = await this.prisma.$queryRaw<Array<{ data: WorkAnswer }>>`SELECT "data" FROM "sema_core_results" WHERE "executionId" = ${executionId} AND "resultType" = 'capability.answer' LIMIT 1`;
     return rows[0]?.data;
   }
+  async recentAnswers(serviceVersionIds: string[], limit: number) {
+    if (!serviceVersionIds.length) return [];
+    const rows = await this.prisma.$queryRawUnsafe<Array<{ providerId: string; data: WorkAnswer }>>(
+      `SELECT e."providerId", r."data" FROM "sema_core_results" r JOIN "sema_core_executions" e ON e."id" = r."executionId"
+       WHERE r."resultType" = 'capability.answer' AND e."providerId" = ANY($1::text[]) ORDER BY r."createdAt" DESC LIMIT $2`, serviceVersionIds, limit);
+    return rows.map((row) => ({ serviceVersionId: row.providerId, answer: row.data }));
+  }
   async addResult(result: CommandResult) {
     const added = await this.prisma.$executeRaw`
       INSERT INTO "sema_core_results" ("id", "commandId", "resultType", "subjectIds", "data", "createdAt")
