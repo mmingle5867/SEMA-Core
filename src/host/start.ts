@@ -9,6 +9,8 @@ import { SemaCoreHost } from './sema-core-host.js';
 import { SEMA_CORE_VERSION } from '../version.js';
 import { SemaCore } from '../core/sema-core.js';
 import { resolveStart, startJoinServer } from './join.js';
+import { recordStops } from './stop-log.js';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { FileKeyStore } from '../keys/machine-key.js';
 import { PrismaClientKeyStore } from '../keys/client-keys.js';
@@ -18,6 +20,7 @@ import { PrismaCapabilityStore } from '../capabilities/prisma-capability-store.j
 import { CapabilityWork } from '../capabilities/work.js';
 import { PrismaWorkStore } from '../capabilities/prisma-work-store.js';
 
+const sayWhyStopping = recordStops(join(process.cwd(), 'logs', 'stops.log'), SEMA_CORE_VERSION);
 const port = Number(process.env.SEMA_CORE_PORT ?? '4310');
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('SEMA_CORE_PORT must be a valid port');
 const hostname = process.env.SEMA_CORE_HOSTNAME ?? '127.0.0.1';
@@ -87,4 +90,17 @@ const lostMinutes = Number(process.env.SEMA_CORE_INSTANCE_LOST_MINUTES ?? 10);
 // A job whose service has not said it is still working for this many seconds is marked failed (D-180). 0 turns it off.
 const silentSeconds = Number(process.env.SEMA_CORE_EXECUTION_SILENT_SECONDS ?? 90);
 host.startInstanceSweep(15_000, Number.isFinite(lostMinutes) ? lostMinutes * 60_000 : 600_000, Number.isFinite(silentSeconds) && silentSeconds > 0 ? silentSeconds * 1000 : Number.MAX_SAFE_INTEGER);
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { void store.disconnect().finally(() => process.exit(0)); }));
+// Stopping: on Ctrl+C or Ctrl+Break, when its console closes, or when the Console's stop script writes a file named
+// .sema-stop into this folder (a background process on Windows cannot be sent Ctrl+C). Core then ends on its own rather
+// than through process.exit(): on Windows, Node can crash when made to exit right after requests. The timer only
+// fires if something is still holding the process open.
+let stopping = false;
+const shutdown = (why: string) => {
+  if (stopping) return;
+  stopping = true;
+  sayWhyStopping(why);
+  server.close(() => { void store.disconnect().finally(() => setTimeout(() => process.exit(0), 5000).unref()); });
+};
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] as const) process.on(signal, () => shutdown(`received ${signal}`));
+const stopRequest = join(process.cwd(), '.sema-stop');
+setInterval(() => { if (existsSync(stopRequest)) { rmSync(stopRequest, { force: true }); shutdown('stop requested by the System Console'); } }, 1000).unref();
