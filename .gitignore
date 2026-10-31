@@ -8,3 +8,6 @@ coverage/
 /keys/
 # Built by npm run build; never kept in git
 /dist/
+# The record of why Core stopped, and the Console's request to stop
+/logs/
+.sema-stop
