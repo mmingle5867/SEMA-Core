@@ -1,6 +1,6 @@
 {
   "name": "@selo/sema-core",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "private": true,
   "description": "Local-first SEMA Core: identity, command, event, audit, policy, and capability contracts.",
   "type": "module",
@@ -21,7 +21,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "tsx test/core.test.ts && tsx test/base56.test.ts && tsx test/core-host.test.ts && tsx test/http.test.ts && tsx test/credentials.test.ts && tsx test/local-nodes.test.ts && tsx test/local-nodes-host.test.ts && tsx test/conversations.test.ts && tsx test/core-to-core.test.ts && tsx test/topology-operations.test.ts && tsx test/add-parent-above.test.ts && tsx test/replace-lost.test.ts && tsx test/install-machine.test.ts && tsx test/adopt-issued.test.ts && tsx test/roll-up.test.ts && tsx test/next-basis.test.ts && tsx test/check-ins.test.ts && tsx test/walk-down.test.ts && tsx test/suspend.test.ts && tsx test/access-unreachable.test.ts && tsx test/organization-choices.test.ts && tsx test/describe.test.ts && tsx test/service-settings.test.ts && tsx test/seats.test.ts && tsx test/signed-requests.test.ts && tsx test/capability-records.test.ts && tsx test/capability-commands.test.ts && tsx test/service-wrapper.test.ts && tsx test/sema-ids.test.ts",
+    "test": "tsx test/core.test.ts && tsx test/base56.test.ts && tsx test/core-host.test.ts && tsx test/http.test.ts && tsx test/credentials.test.ts && tsx test/local-nodes.test.ts && tsx test/local-nodes-host.test.ts && tsx test/conversations.test.ts && tsx test/core-to-core.test.ts && tsx test/topology-operations.test.ts && tsx test/add-parent-above.test.ts && tsx test/replace-lost.test.ts && tsx test/install-machine.test.ts && tsx test/adopt-issued.test.ts && tsx test/roll-up.test.ts && tsx test/next-basis.test.ts && tsx test/check-ins.test.ts && tsx test/walk-down.test.ts && tsx test/suspend.test.ts && tsx test/access-unreachable.test.ts && tsx test/organization-choices.test.ts && tsx test/describe.test.ts && tsx test/service-settings.test.ts && tsx test/seats.test.ts && tsx test/signed-requests.test.ts && tsx test/capability-records.test.ts && tsx test/capability-commands.test.ts && tsx test/service-wrapper.test.ts && tsx test/sema-ids.test.ts && tsx test/stop-log.test.ts",
     "test:host": "tsx test/core-host.test.ts",
     "test:postgres": "tsx test/postgres-local-nodes.test.ts",
     "typecheck": "tsc --noEmit",
