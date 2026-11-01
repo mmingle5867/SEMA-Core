@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { localTime, unexplainedStop } from '../src/host/stop-log.js';
+import { bothTimes, unexplainedStop } from '../src/host/stop-log.js';
 
 const folder = mkdtempSync(join(tmpdir(), 'sema-stop-log-'));
 const module = pathToFileURL(join(process.cwd(), 'src', 'host', 'stop-log.ts')).href;
@@ -17,10 +17,11 @@ function run(name: string, body: string) {
 }
 
 try {
-  // Local time with its offset names the same moment, on either side of a clock change.
+  // Local time with its offset and UTC name the same moment, on either side of a clock change.
   for (const moment of ['2026-07-01T12:00:05.000Z', '2026-12-01T12:00:05.000Z']) {
-    const [day, time, offset] = localTime(new Date(moment)).split(' ');
+    const [day, time, offset, , utcDay, utcTime] = bothTimes(new Date(moment)).split(' ');
     assert.equal(new Date(`${day}T${time}${offset}`).toISOString(), moment);
+    assert.equal(`${utcDay}T${utcTime}.000Z`, moment);
   }
 
   // No record yet: nothing to report.
@@ -29,7 +30,7 @@ try {
   // Nothing left to do: it ends by itself and says so.
   const drained = run('drained', '');
   assert.equal(drained.status, 0);
-  assert.match(drained.stops, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2} SEMA Core v9\.9\.9 started, process \d+\n/);
+  assert.match(drained.stops, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2} \/ \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC SEMA Core v9\.9\.9 started, process \d+\n/);
   assert.match(drained.stops, /Stopped, exit code 0 \(nothing was keeping it running\)\n$/);
 
   // A reason given: it is written, before the line that says it stopped.
