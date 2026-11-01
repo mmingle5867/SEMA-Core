@@ -1,6 +1,14 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync, utimesSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+/** This machine's local time, with its offset from UTC so the hour the clocks go back still reads one way. */
+export function localTime(date: Date): string {
+  const two = (value: number) => String(value).padStart(2, '0');
+  const offset = -date.getTimezoneOffset();
+  const sign = offset < 0 ? '-' : '+';
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())} ${sign}${two(Math.floor(Math.abs(offset) / 60))}:${two(Math.abs(offset) % 60)}`;
+}
+
 /**
  * What the file says about the run before this one, when that run never said why it stopped. Its last line is then
  * still the line it wrote when it started, and the file's time is the last time it was seen alive.
@@ -10,7 +18,7 @@ export function unexplainedStop(file: string): string | undefined {
   try { text = readFileSync(file, 'utf8'); } catch { return undefined; }
   const last = text.trimEnd().split('\n').at(-1) ?? '';
   if (!/ started, process \d+$/.test(last)) return undefined;
-  return `The run before this one (${last}) ended without saying why; last seen alive ${statSync(file).mtime.toISOString()}. It was ended from outside (Stop-Process, taskkill, Task Manager), or Windows or the machine stopped. A crash inside Node also prints to the error log.`;
+  return `The run before this one (${last}) ended without saying why; last seen alive ${localTime(statSync(file).mtime)}. It was ended from outside (Stop-Process, taskkill, Task Manager), or Windows or the machine stopped. A crash inside Node also prints to the error log.`;
 }
 
 /**
@@ -22,7 +30,7 @@ export function unexplainedStop(file: string): string | undefined {
 export function recordStops(file: string, version: string) {
   let reasonGiven = false;
   const write = (line: string) => {
-    const text = `${new Date().toISOString()} ${line}`;
+    const text = `${localTime(new Date())} ${line}`;
     console.log(text);
     try { mkdirSync(dirname(file), { recursive: true }); appendFileSync(file, `${text}\n`); } catch (error) { console.error(`Could not write ${file}: ${error instanceof Error ? error.message : String(error)}`); }
   };
