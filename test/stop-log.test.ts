@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { unexplainedStop } from '../src/host/stop-log.js';
+import { localTime, unexplainedStop } from '../src/host/stop-log.js';
 
 const folder = mkdtempSync(join(tmpdir(), 'sema-stop-log-'));
 const module = pathToFileURL(join(process.cwd(), 'src', 'host', 'stop-log.ts')).href;
@@ -17,13 +17,19 @@ function run(name: string, body: string) {
 }
 
 try {
+  // Local time with its offset names the same moment, on either side of a clock change.
+  for (const moment of ['2026-07-01T12:00:05.000Z', '2026-12-01T12:00:05.000Z']) {
+    const [day, time, offset] = localTime(new Date(moment)).split(' ');
+    assert.equal(new Date(`${day}T${time}${offset}`).toISOString(), moment);
+  }
+
   // No record yet: nothing to report.
   assert.equal(unexplainedStop(join(folder, 'none.log')), undefined);
 
   // Nothing left to do: it ends by itself and says so.
   const drained = run('drained', '');
   assert.equal(drained.status, 0);
-  assert.match(drained.stops, /SEMA Core v9\.9\.9 started, process \d+\n/);
+  assert.match(drained.stops, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2} SEMA Core v9\.9\.9 started, process \d+\n/);
   assert.match(drained.stops, /Stopped, exit code 0 \(nothing was keeping it running\)\n$/);
 
   // A reason given: it is written, before the line that says it stopped.
@@ -49,7 +55,7 @@ try {
 
   // Ended from outside: nothing could be written then, so the next start says so.
   const killed = join(folder, 'killed.log');
-  writeFileSync(killed, '2026-10-26T03:40:01.000Z SEMA Core v0.11.1 started, process 1234\n');
+  writeFileSync(killed, '2026-10-25 23:40:01 -04:00 SEMA Core v0.11.1 started, process 1234\n');
   assert.match(unexplainedStop(killed)!, /process 1234\) ended without saying why; last seen alive /);
   const next = run('killed', '');
   assert.match(next.stops, /ended without saying why/);
